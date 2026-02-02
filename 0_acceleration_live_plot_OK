@@ -1,0 +1,168 @@
+import socket
+import matplotlib.pyplot as plt
+from matplotlib.animation import FuncAnimation
+from collections import deque
+import time
+import numpy as np
+import pandas as pd
+
+# Configuration
+'''
+Access point: WMS00DABC9B
+Mdp: 00DABC9B
+'''
+HOST = '192.168.4.1'
+PORT = 3535
+DATA_LOG = []
+N = 200                 # sliding window size
+UPDATE_MS = 100         # plot refresh (ms)
+SENSITIVITY = 256000     # LSB / g (adjust if needed)
+
+
+# 1. Data acquisition: Function to extract data from the TCP stream
+def read_accel(sock, verbose=True):
+    """
+    Returns:
+        t_pc : float [s]   (PC monotonic timestamp)
+        ax_lsb, ay_lsb, az_lsb : int (raw accelerometer data)
+    """
+    try:
+        raw = sock.recv(1024)
+        if not raw:
+            return None
+        lines = raw.decode(errors='ignore').split('\n')
+
+        for line in lines:
+            if line.startswith('ASC3'):
+                parts = line.strip().split('\t')
+                if len(parts) >= 5:
+                    try:
+                        t_pc = time.perf_counter()                        
+                        x_lsb = int(parts[2])
+                        y_lsb = int(parts[3])
+                        z_lsb = int(parts[4])
+
+                        if verbose:
+                            print(f"Raw Data: t={t_pc:.6f} x={x_lsb} y={y_lsb} z={z_lsb}")
+                        return t_pc, x_lsb, y_lsb, z_lsb
+                    except ValueError:
+                        return None
+    except (BlockingIOError, OSError):        
+        return None
+
+# 2. LSB → g conversion
+def lsb_to_g(ax_lsb, ay_lsb, az_lsb, sensitivity=SENSITIVITY):
+    ax_g = ax_lsb / sensitivity
+    ay_g = ay_lsb / sensitivity
+    az_g = az_lsb / sensitivity
+    return ax_g, ay_g, az_g
+
+# 3. Angle computation
+def compute_angles(ax_g, ay_g, az_g):
+    """
+    θ = atan(Ax / sqrt(Ay² + Az²))
+    ψ = atan(Ay / sqrt(Ax² + Az²))
+    """
+    eps = 1e-12
+    theta = np.degrees(np.arctan2(ax_g, np.sqrt(ay_g**2 + az_g**2 + eps)))
+    psi   = np.degrees(np.arctan2(ay_g, np.sqrt(ax_g**2 + az_g**2 + eps)))
+    return theta, psi
+
+# 4. Main application
+def main():
+    # Connect to the sensor
+    print(f"Connecting to {HOST}:{PORT}...")
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.connect((HOST, PORT))
+    sock.setblocking(False)
+    print("Connected. Waiting for data...")
+
+    t0 = time.perf_counter()
+
+    # Buffers to store last N data points
+    t_buf = deque(maxlen=N)       # PC timestamp [s]
+    ax_g_buf = deque(maxlen=N)
+    ay_g_buf = deque(maxlen=N)
+    az_g_buf = deque(maxlen=N)
+    theta_buf = deque(maxlen=N)   # deg
+    psi_buf = deque(maxlen=N)     # deg
+    
+    # Set up the acceleration & angle plot
+    fig, (ax1, ax2) = plt.subplots(2, 1, sharex=True)
+    
+    line_x, = ax1.plot([], [], label='Ax [g]')
+    line_y, = ax1.plot([], [], label='Ay [g]')
+    line_z, = ax1.plot([], [], label='Az [g]')
+
+    ax1.set_title('Real-Time Accelerometer Data')
+    ax1.set_xlabel('Time (s)')
+    ax1.set_ylabel('Acceleration [g]')
+    ax1.legend()
+    ax1.grid(True)
+    ax1.set_ylim(-1.2, 1.2)
+
+    line_theta, = ax2.plot([], [], label=r'$\theta$ [deg]')
+    line_psi,   = ax2.plot([], [], label=r'$\psi$ [deg]')
+
+    ax2.set_ylabel('Angle [deg]')
+    ax2.set_xlabel('Time [s]')
+    ax2.legend()
+    ax2.grid(True)
+    ax2.set_ylim(-90, 90)
+
+    # Update function
+    def update(frame):
+        data = read_accel(sock)
+        if data is None:
+            return line_x, line_y, line_z, line_theta, line_psi
+
+        t_pc, ax_lsb, ay_lsb, az_lsb = data
+        t = t_pc - t0
+
+        ax_g, ay_g, az_g = lsb_to_g(ax_lsb, ay_lsb, az_lsb)
+        theta, psi = compute_angles(ax_g, ay_g, az_g)
+
+        t_buf.append(t)
+        ax_g_buf.append(ax_g)
+        ay_g_buf.append(ay_g)
+        az_g_buf.append(az_g)
+
+        theta_buf.append(theta)
+        psi_buf.append(psi)
+
+        # Save data to in-memory list
+        DATA_LOG.append({'timestamp': t, 'ax_lsb': ax_lsb, 'ay_lsb': ay_lsb, 'az_lsb': az_lsb, 'theta_deg': theta, 'psi_deg': psi})
+
+        # dynamic window
+        ax2.set_xlim(max(0, t - 10), t)
+
+        # update plots
+        line_x.set_data(t_buf, ax_g_buf)
+        line_y.set_data(t_buf, ay_g_buf)
+        line_z.set_data(t_buf, az_g_buf)
+
+        line_theta.set_data(t_buf, theta_buf)
+        line_psi.set_data(t_buf, psi_buf)
+
+        return line_x, line_y, line_z, line_theta, line_psi
+
+    ani = FuncAnimation(
+        fig,
+        update,
+        interval=UPDATE_MS,
+        blit=False,
+        cache_frame_data=False
+    )
+
+    plt.tight_layout()
+    plt.show()
+
+# Entry point
+if __name__ == "__main__":
+    main()
+
+    # Save to CSV when plot is closed
+    df = pd.DataFrame(DATA_LOG)
+    filename = f"accelerometer_log_{time.strftime('%Y%m%d_%H%M%S')}.csv"
+    df.to_csv(filename, index=False)
+    print(f"Acceleration log saved to {filename}")

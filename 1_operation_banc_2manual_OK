@@ -1,0 +1,72 @@
+import serial
+import time
+import tkinter as tk
+
+# Setup serial connection
+ser = serial.Serial(
+    port="COM7",      # replace with your board port
+    baudrate=115200,
+    timeout=1
+)
+
+# Wait for MCU to reset
+time.sleep(2)
+
+# Define helper function
+def send_command(cmd):
+    """Send command to MCU and print response"""
+    ser.write((cmd + "\n").encode())
+    response = ser.readline().decode().strip()
+    if response:
+        print("MCU:", response)
+
+# GUI callbacks
+def send_m1():
+    speed = m1_var.get()
+    send_command(f"?m1={speed}")
+
+def send_m2():
+    speed = m2_var.get()
+    send_command(f"?m2={speed}")
+
+def stop_all():
+    send_command("?stopall")
+
+# Main GUI
+root = tk.Tk()
+root.title("Manual Motor Control")
+
+# Default speed
+DEFAULT_SPEED = 20
+
+# Motor 1
+tk.Label(root, text="Motor 1 Speed (%)").grid(row=0, column=0, padx=5, pady=5)
+m1_var = tk.IntVar(value=DEFAULT_SPEED)
+m1_slider = tk.Scale(root, from_=-100, to=100, orient="horizontal", variable=m1_var)
+m1_slider.grid(row=0, column=1, padx=5, pady=5)
+m1_entry = tk.Entry(root, textvariable=m1_var, width=5)
+m1_entry.grid(row=0, column=2, padx=5, pady=5)
+m1_button = tk.Button(root, text="Set Motor 1", command=send_m1)
+m1_button.grid(row=0, column=3, padx=5, pady=5)
+
+# Motor 2
+tk.Label(root, text="Motor 2 Speed (%)").grid(row=1, column=0, padx=5, pady=5)
+m2_var = tk.IntVar(value=DEFAULT_SPEED)
+m2_slider = tk.Scale(root, from_=-100, to=100, orient="horizontal", variable=m2_var)
+m2_slider.grid(row=1, column=1, padx=5, pady=5)
+m2_entry = tk.Entry(root, textvariable=m2_var, width=5)
+m2_entry.grid(row=1, column=2, padx=5, pady=5)
+m2_button = tk.Button(root, text="Set Motor 2", command=send_m2)
+m2_button.grid(row=1, column=3, padx=5, pady=5)
+
+# STOP ALL button
+stop_button = tk.Button(root, text="STOP ALL", bg="red", fg="white", command=stop_all)
+stop_button.grid(row=2, column=0, columnspan=4, pady=10)
+
+# Run GUI loop
+try:
+    root.mainloop()
+finally:
+    stop_all()
+    ser.close()
+    print("Program terminated safely.")
