@@ -5,3 +5,6 @@ Le projet consiste à développer un logiciel Python permettant de piloter un ba
 
 ## Identification des livrables
 Livrables minimum : un programme Python fonctionnel, pilotage du banc (simulation si besoin), acquisition et sauvegarde des données, calibrage intégré, interface utilisateur simple, rapport
+
+## Choix techniques définitifs
+Langage : Python / Interface : ? / Données : CSV / Versioning : Git
