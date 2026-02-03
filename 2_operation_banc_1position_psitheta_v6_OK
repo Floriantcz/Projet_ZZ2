@@ -86,29 +86,35 @@ def lsb_to_g(ax_lsb, ay_lsb, az_lsb, sensitivity=SENSITIVITY):
 
 # Angle computation
 
-def compute_angles(ax_g, ay_g, az_g):
-    
+def compute_psi_base(ax_g: float, ay_g: float, az_g: float) -> float:
+    """
+    Compute a psi candidate in degrees in [-180, +180].
+    - ax_g, ay_g, az_g : accelerometer readings in g
+    - theta = rotation around Y axis (not used here)
+    - psi   = rotation around X axis (continuous, signed)
+    """
     eps = 1e-12
 
-    # --- Theta (tilt) ---
-    theta = np.degrees(np.arctan2(ax_g, np.sqrt(ay_g**2 + az_g**2 + eps)))
+    # Compute "raw" psi ignoring az sign
+    alpha = math.degrees(math.atan2(ay_g, math.sqrt(ax_g*ax_g + az_g*az_g + eps)))
 
-    # --- Psi (rotation around X) ---
-    alpha_psi = np.degrees(np.arctan2(ay_g, np.sqrt(ax_g**2 + az_g**2 + eps)))
-
-    # Correct for upside-down orientation
+    # Correct for az < 0 to get full [-180, +180] range
     if az_g < 0:
-        psi = 180.0 - alpha_psi
+        if ay_g >= 0:
+            psi = 180.0 - alpha
+        else:
+            psi = -180.0 - alpha
     else:
-        psi = alpha_psi
+        psi = alpha
 
-    # Normalize psi to [-180, +180]
+    # Normalize to [-180, +180]
     if psi > 180.0:
         psi -= 360.0
     elif psi < -180.0:
         psi += 360.0
 
-    return theta, psi
+    return psi
+
 
 # ------------------- ACCELEROMETER THREAD ----------------
 def accel_reader():
