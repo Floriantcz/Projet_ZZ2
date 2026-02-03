@@ -206,43 +206,44 @@ def build_serial_obj(serial_port: str = SERIAL_PORT, baud: int = BAUDRATE):
 # ---------------- Control routines ----------------
 def move_theta(target: float, ser_obj, theta_cmd_holder: dict):
     print(f"\n→ move_theta: target={target:.1f}° (cmd was {theta_cmd_holder['theta_cmd']:.1f}°)")
-    delta_cmd = target - theta_cmd_holder["theta_cmd"]
-    if abs(delta_cmd) < 0.1: return
+
+    # Lecture initiale de la position réelle
+    with accel_lock:
+        current_theta = latest_theta if latest_theta is not None else theta_cmd_holder["theta_cmd"]
+
+    delta_cmd = target - current_theta
+    if abs(delta_cmd) < 0.1:
+        print("  Already at target (or very close)")
+        theta_cmd_holder["theta_cmd"] = target
+        return
 
     direction = 1 if delta_cmd > 0 else -1
     abs_delta = abs(delta_cmd)
     t_est = abs_delta / max(OMEGA_EST, 1e-6)
     t_coarse = min(t_est * 1.1, 90.0)
 
+    # Coarse move
     send_command(ser_obj, f"?m1={direction * MOTOR_SPEED}")
     t0 = time.time()
-    stopped = False
-
-    while running_event.is_set() and (time.time() - t0) < t_coarse * 2.0:
-        with accel_lock: th = latest_theta
+    while running_event.is_set() and (time.time() - t0) < t_coarse:
+        with accel_lock:
+            th = latest_theta
         if th is not None and abs(target - th) < 3.0:
-            stop_all(ser_obj)
-            stopped = True
             break
         time.sleep(CONTROL_PERIOD)
+    stop_all(ser_obj)
 
-    if not stopped: stop_all(ser_obj)
-
-    with accel_lock: accel = latest_accel_g
-    reliable = accel is not None and (ACCEL_NORM_MIN <= math.sqrt(accel[0]**2 + accel[1]**2 + accel[2]**2) <= ACCEL_NORM_MAX)
-    if not reliable:
-        print("  accel unreliable for fine correction -> accept coarse result")
-        theta_cmd_holder["theta_cmd"] = target
-        time.sleep(0.5)
-        return
-
+    # Fine move (proportional loop)
     fine_start = time.time()
     while running_event.is_set() and (time.time() - fine_start) < 30.0:
-        with accel_lock: th = latest_theta
-        if th is None: break
+        with accel_lock:
+            th = latest_theta
+        if th is None:
+            break
         err = target - th
-        if abs(err) <= ANGLE_TOL: break
-        cmd = max(min(KP_FINE*err, MOTOR_SPEED), -MOTOR_SPEED)
+        if abs(err) <= ANGLE_TOL:
+            break
+        cmd = max(min(KP_FINE * err, MOTOR_SPEED), -MOTOR_SPEED)
         send_command(ser_obj, f"?m1={int(round(cmd))}")
         time.sleep(CONTROL_PERIOD)
 
@@ -287,8 +288,7 @@ def sweep_psi_stepwise_180(theta_deg: float, ser_obj, dataset: List[List], step_
             log_time = raw_ts if raw_ts else _now_iso()
             if psi_unwrapped is not None and theta_meas is not None and accel and raw:
                 normg = math.sqrt(accel[0]**2 + accel[1]**2 + accel[2]**2)
-                dataset.append([log_time, theta_deg, theta_meas, psi_unwrapped,
-                                raw[0], raw[1], raw[2], normg])
+                dataset.append([log_time, theta_deg, theta_meas, psi_unwrapped, raw[0], raw[1], raw[2], normg])
                 print(f"  Segment {idx_seg+1} step {k}/{n_steps} | Psi={psi_unwrapped:.1f}° | Theta={theta_meas:.1f}° | |g|={normg:.3f}")
             else:
                 print(f"  Segment {idx_seg+1} step {k}/{n_steps} | missing data")
