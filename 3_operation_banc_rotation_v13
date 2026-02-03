@@ -4,7 +4,8 @@ Accelerometer calibration bench pilot (theta limited to [-90, +90], continuous/u
 
 Modifications:
  - Theta stays signed in [-90, +90]
- - Psi is continuous (unwrapped) and now sweeps in 180° round-trips instead of full 360° stepwise
+ - Psi is continuous (unwrapped)
+ - Accel sweep now stepwise in 30° increments, round-trip 180° for each armature step
 """
 
 import argparse
@@ -26,21 +27,18 @@ BAUDRATE = 115200
 SENSITIVITY = 256000.0  # LSB/g
 
 MOTOR_SPEED = 30
-OMEGA_EST = 8.04  # deg/s @ MOTOR_SPEED (calibrate)
+OMEGA_EST = 8.04  # deg/s @ MOTOR_SPEED
 
 KP_FINE = 2.0
 ANGLE_TOL = 1.0  # deg
-
 CONTROL_PERIOD = 0.05
 
 # Settling parameters
 SETTLE_TIMEOUT = 8.0
 STABLE_DURATION = 1.5
 STABLE_TOL = 0.008
-
 ACCEL_NORM_MIN = 0.7
 ACCEL_NORM_MAX = 1.3
-
 SOCKET_TIMEOUT = 1.0
 
 # ---------------- Shared state ----------------
@@ -178,10 +176,8 @@ def send_command(ser_obj, cmd: str):
         out = (cmd + "\n").encode()
         ser_obj.write(out)
         if hasattr(ser_obj, "flush"):
-            try:
-                ser_obj.flush()
-            except Exception:
-                pass
+            try: ser_obj.flush()
+            except Exception: pass
     except Exception as e:
         print(f"[send_command] {e} cmd={cmd}")
 
@@ -192,10 +188,8 @@ class SerialStub:
     def write(self, b):
         s = b.decode() if isinstance(b, (bytes, bytearray)) else str(b)
         print(f"[SerialStub] -> {s}")
-    def flush(self):
-        pass
-    def close(self):
-        pass
+    def flush(self): pass
+    def close(self): pass
 
 def build_serial_obj(serial_port: str = SERIAL_PORT, baud: int = BAUDRATE):
     try:
@@ -213,9 +207,7 @@ def build_serial_obj(serial_port: str = SERIAL_PORT, baud: int = BAUDRATE):
 def move_theta(target: float, ser_obj, theta_cmd_holder: dict):
     print(f"\n→ move_theta: target={target:.1f}° (cmd was {theta_cmd_holder['theta_cmd']:.1f}°)")
     delta_cmd = target - theta_cmd_holder["theta_cmd"]
-    if abs(delta_cmd) < 0.1:
-        print("  already at commanded theta")
-        return
+    if abs(delta_cmd) < 0.1: return
 
     direction = 1 if delta_cmd > 0 else -1
     abs_delta = abs(delta_cmd)
@@ -227,21 +219,16 @@ def move_theta(target: float, ser_obj, theta_cmd_holder: dict):
     stopped = False
 
     while running_event.is_set() and (time.time() - t0) < t_coarse * 2.0:
-        with accel_lock:
-            th = latest_theta
-        if th is not None:
-            err = target - th
-            if abs(err) < 3.0:
-                stop_all(ser_obj)
-                stopped = True
-                break
+        with accel_lock: th = latest_theta
+        if th is not None and abs(target - th) < 3.0:
+            stop_all(ser_obj)
+            stopped = True
+            break
         time.sleep(CONTROL_PERIOD)
 
-    if not stopped:
-        stop_all(ser_obj)
+    if not stopped: stop_all(ser_obj)
 
-    with accel_lock:
-        accel = latest_accel_g
+    with accel_lock: accel = latest_accel_g
     reliable = accel is not None and (ACCEL_NORM_MIN <= math.sqrt(accel[0]**2 + accel[1]**2 + accel[2]**2) <= ACCEL_NORM_MAX)
     if not reliable:
         print("  accel unreliable for fine correction -> accept coarse result")
@@ -250,18 +237,12 @@ def move_theta(target: float, ser_obj, theta_cmd_holder: dict):
         return
 
     fine_start = time.time()
-    fine_timeout = 30.0
-    while running_event.is_set() and (time.time() - fine_start) < fine_timeout:
-        with accel_lock:
-            th = latest_theta
-        if th is None:
-            print("  lost accel during fine correction")
-            break
+    while running_event.is_set() and (time.time() - fine_start) < 30.0:
+        with accel_lock: th = latest_theta
+        if th is None: break
         err = target - th
-        if abs(err) <= ANGLE_TOL:
-            break
-        cmd = KP_FINE * err
-        cmd = max(min(cmd, MOTOR_SPEED), -MOTOR_SPEED)
+        if abs(err) <= ANGLE_TOL: break
+        cmd = max(min(KP_FINE*err, MOTOR_SPEED), -MOTOR_SPEED)
         send_command(ser_obj, f"?m1={int(round(cmd))}")
         time.sleep(CONTROL_PERIOD)
 
@@ -270,67 +251,41 @@ def move_theta(target: float, ser_obj, theta_cmd_holder: dict):
     wait_for_settle(timeout=2.0, stable_duration=0.4, tol=STABLE_TOL)
     print(f"  theta_cmd updated -> {theta_cmd_holder['theta_cmd']:.1f}°")
 
-# ---------------- PSI sweep (round-trip 180°) ----------------
-def sweep_psi_roundtrip(theta_deg: float, ser_obj, dataset: List[List]):
-    print(f"→ sweep_psi_roundtrip at theta_cmd {theta_deg:.1f}°")
+# ---------------- PSI sweep stepwise 180° ----------------
+def sweep_psi_stepwise_180(theta_deg: float, ser_obj, dataset: List[List], step_deg: float = 30.0):
+    print(f"→ sweep_psi_stepwise_180 at theta_cmd {theta_deg:.1f}°")
 
-    with accel_lock:
-        psi_start = latest_psi_unwrapped
-    if psi_start is None:
-        print("  Warning: cannot sweep psi, initial psi unknown")
-        return
-
-    sweep_steps = [
-        {"dir": 1, "angle": 180},
-        {"dir": -1, "angle": 180}
+    sweep_ranges = [
+        (0, 180, step_deg),
+        (180, 0, -step_deg),
+        (0, -180, -step_deg),
+        (-180, 0, step_deg)
     ]
 
-    for step_idx, step in enumerate(sweep_steps):
-        direction = step["dir"]
-        angle = step["angle"]
-        t_move = min(angle / max(OMEGA_EST, 1e-6), 60.0)
+    for idx_range, (start, end, step) in enumerate(sweep_ranges):
+        n_steps = int(abs(end - start)/abs(step))
+        for k in range(1, n_steps+1):
+            target = start + k*step
+            direction = 1 if step > 0 else -1
+            t_step = min(abs(step)/max(OMEGA_EST,1e-6), 60.0)
+            send_command(ser_obj, f"?m2={direction*MOTOR_SPEED}")
+            time.sleep(t_step)
+            stop_all(ser_obj)
+            wait_for_settle(timeout=SETTLE_TIMEOUT, stable_duration=STABLE_DURATION, tol=STABLE_TOL)
 
-        send_command(ser_obj, f"?m2={direction * MOTOR_SPEED}")
-        time.sleep(t_move)
-        stop_all(ser_obj)
-        wait_for_settle(timeout=SETTLE_TIMEOUT, stable_duration=STABLE_DURATION, tol=STABLE_TOL)
-
-        # Record at max rotation
-        with accel_lock:
-            psi_unwrapped = latest_psi_unwrapped
-            theta_meas = latest_theta
-            accel = latest_accel_g
-            raw = latest_raw_lsb
-            raw_ts = latest_raw_ts
-        log_time = raw_ts if raw_ts else _now_iso()
-        if psi_unwrapped is not None and theta_meas is not None and accel is not None and raw is not None:
-            normg = math.sqrt(accel[0]**2 + accel[1]**2 + accel[2]**2)
-            dataset.append([log_time, theta_deg, theta_meas, psi_unwrapped, raw[0], raw[1], raw[2], normg])
-            print(f"  Step {step_idx+1} | Psi_unwrapped={psi_unwrapped:.1f}° | Theta_meas={theta_meas:.1f}° | |g|={normg:.3f}")
-        else:
-            print(f"  Step {step_idx+1} | missing accel data")
-
-        # Return to start
-        send_command(ser_obj, f"?m2={-direction * MOTOR_SPEED}")
-        time.sleep(t_move)
-        stop_all(ser_obj)
-        wait_for_settle(timeout=SETTLE_TIMEOUT, stable_duration=STABLE_DURATION, tol=STABLE_TOL)
-
-        with accel_lock:
-            psi_unwrapped = latest_psi_unwrapped
-            theta_meas = latest_theta
-            accel = latest_accel_g
-            raw = latest_raw_lsb
-            raw_ts = latest_raw_ts
-        log_time = raw_ts if raw_ts else _now_iso()
-        if psi_unwrapped is not None and theta_meas is not None and accel is not None and raw is not None:
-            normg = math.sqrt(accel[0]**2 + accel[1]**2 + accel[2]**2)
-            dataset.append([log_time, theta_deg, theta_meas, psi_unwrapped, raw[0], raw[1], raw[2], normg])
-            print(f"  Step {step_idx+1} return | Psi_unwrapped={psi_unwrapped:.1f}° | Theta_meas={theta_meas:.1f}° | |g|={normg:.3f}")
-        else:
-            print(f"  Step {step_idx+1} return | missing accel data")
-
-    print("→ psi round-trip sweep done\n")
+            with accel_lock:
+                psi_unwrapped = latest_psi_unwrapped
+                theta_meas = latest_theta
+                accel = latest_accel_g
+                raw = latest_raw_lsb
+                raw_ts = latest_raw_ts
+            log_time = raw_ts if raw_ts else _now_iso()
+            if psi_unwrapped and theta_meas is not None and accel and raw:
+                normg = math.sqrt(accel[0]**2+accel[1]**2+accel[2]**2)
+                dataset.append([log_time, theta_deg, theta_meas, psi_unwrapped, raw[0], raw[1], raw[2], normg])
+                print(f"  Sweep {idx_range+1} step {k}/{n_steps} | Psi={psi_unwrapped:.1f}° | Theta={theta_meas:.1f}° | |g|={normg:.3f}")
+            else:
+                print(f"  Sweep {idx_range+1} step {k}/{n_steps} | missing data")
 
 # ---------------- Dataset IO ----------------
 def save_dataset_csv(dataset: List[List], prefix: str = "scan_dataset") -> Optional[str]:
@@ -341,8 +296,8 @@ def save_dataset_csv(dataset: List[List], prefix: str = "scan_dataset") -> Optio
     try:
         with open(fname, "w", newline="") as f:
             writer = csv.writer(f)
-            writer.writerow(["time_utc", "theta_cmd_deg", "theta_meas_deg", "psi_unwrapped_deg",
-                             "x_lsb", "y_lsb", "z_lsb", "norm_g"])
+            writer.writerow(["time_utc","theta_cmd_deg","theta_meas_deg","psi_unwrapped_deg",
+                             "x_lsb","y_lsb","z_lsb","norm_g"])
             writer.writerows(dataset)
         print(f"[I/O] dataset saved to {fname}")
         return fname
@@ -393,22 +348,21 @@ def run_scan_sequence(host: str, port: int, ser_obj):
             move_theta(target_theta, ser_obj, theta_cmd_holder)
 
             if psi_sweep:
-                sweep_psi_roundtrip(target_theta, ser_obj, dataset)
+                sweep_psi_stepwise_180(target_theta, ser_obj, dataset)
             else:
-                stable = wait_for_settle(timeout=SETTLE_TIMEOUT, stable_duration=STABLE_DURATION, tol=STABLE_TOL)
+                wait_for_settle(timeout=SETTLE_TIMEOUT, stable_duration=STABLE_DURATION, tol=STABLE_TOL)
                 with accel_lock:
                     theta_meas = latest_theta
                     psi_unwrapped = latest_psi_unwrapped
                     accel = latest_accel_g
                     raw = latest_raw_lsb
                     raw_ts = latest_raw_ts
-
                 log_time = raw_ts if raw_ts else _now_iso()
-                if accel and theta_meas is not None and psi_unwrapped is not None and raw is not None:
-                    normg = math.sqrt(accel[0]**2 + accel[1]**2 + accel[2]**2)
+                if accel and theta_meas is not None and psi_unwrapped is not None and raw:
+                    normg = math.sqrt(accel[0]**2+accel[1]**2+accel[2]**2)
                     dataset.append([log_time, target_theta, theta_meas, psi_unwrapped,
                                     raw[0], raw[1], raw[2], normg])
-                    print(f"  Recorded | Theta={theta_meas:.1f}°, Psi_unwrapped={psi_unwrapped:.1f}°, |g|={normg:.3f}")
+                    print(f"  Recorded | Theta={theta_meas:.1f}°, Psi={psi_unwrapped:.1f}°, |g|={normg:.3f}")
                 else:
                     print("  Warning: missing accelerometer data for logging")
 
@@ -426,15 +380,11 @@ def run_scan_sequence(host: str, port: int, ser_obj):
         running_event.clear()
         stop_all(ser_obj)
         time.sleep(0.05)
-        try:
-            sock.close()
-        except Exception:
-            pass
+        try: sock.close()
+        except Exception: pass
         if hasattr(ser_obj, "close"):
-            try:
-                ser_obj.close()
-            except Exception:
-                pass
+            try: ser_obj.close()
+            except Exception: pass
         reader.join(timeout=1.0)
         print("[Main] shutdown")
         if saved_fname:
@@ -442,7 +392,7 @@ def run_scan_sequence(host: str, port: int, ser_obj):
 
 # ---------------- CLI ----------------
 def parse_args():
-    p = argparse.ArgumentParser(description="Accelerometer pilot (theta [-90,90], psi unwrapped, round-trip sweep)")
+    p = argparse.ArgumentParser(description="Accelerometer pilot (theta [-90,90], psi unwrapped, stepwise 180° sweep)")
     p.add_argument("--host", default=HOST, help="Accelerometer host")
     p.add_argument("--port", type=int, default=PORT, help="Accelerometer port")
     p.add_argument("--serial", default=SERIAL_PORT, help="Serial port for motor controller")
@@ -458,10 +408,8 @@ def main():
         print(f"[Main] fatal: {e}")
     finally:
         if hasattr(ser_obj, "close"):
-            try:
-                ser_obj.close()
-            except Exception:
-                pass
+            try: ser_obj.close()
+            except Exception: pass
 
 if __name__ == "__main__":
     main()
