@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """
-Accelerometer calibration bench pilot (theta limited to [-90, +90], continuous/unwrapped psi)
-MODIFIED: supports theta_extended 0->180->0->-180->0 with faster return sweeps.
+Accelerometer calibration bench pilot
+- Theta limited to [-90, +90] but extended for ±180 theoretical sweep
+- Continuous/unwrapped psi
+- Recalibration at each step using last N Theta measurements
+- Fast return from 180 -> 0 and -180 -> 0
 """
 
 import argparse
@@ -23,8 +26,8 @@ BAUDRATE = 115200
 SENSITIVITY = 256000.0  # LSB/g
 
 THETA_STEP = 30
-PSI_SWEEP = 360
 PSI_STEP = 30
+PSI_SWEEP = 360
 N_PSI_STEPS = int(PSI_SWEEP / PSI_STEP)
 
 MOTOR_SPEED = 30
@@ -32,34 +35,29 @@ OMEGA_EST = 8.04  # deg/s @ MOTOR_SPEED (calibrate)
 
 KP_FINE = 2.0
 ANGLE_TOL = 1.0  # deg
+RAPID_RETURN_SPEED = 60  # deg/s for fast return
 
 CONTROL_PERIOD = 0.05
 
-# Settling parameters
-SETTLE_TIMEOUT = 8.0      # max seconds to wait for settling at each step
-STABLE_DURATION = 1.5     # seconds of consecutive stable readings required
-STABLE_TOL = 0.008        # g change tolerated during stable window (in g)
+SETTLE_TIMEOUT = 8.0
+STABLE_DURATION = 1.5
+STABLE_TOL = 0.008
 
-# Accel norm sanity bounds
 ACCEL_NORM_MIN = 0.7
 ACCEL_NORM_MAX = 1.3
 
 SOCKET_TIMEOUT = 1.0
 
-# MODIF: hystérésis pour le signe de Z
-Z_HYST = 0.05  # g
-
 # ---------------- Shared state ----------------
 accel_lock = threading.Lock()
-latest_theta: Optional[float] = None            # signed theta in degrees (~-90..+90)
-latest_theta_extended: Optional[float] = None   # MODIF: theta étendu pour 0->180->0->-180->0
-latest_psi_unwrapped: Optional[float] = None    # continuous psi (can exceed 360)
+latest_theta: Optional[float] = None
+latest_theta_extended: Optional[float] = None  # MODIF
+latest_psi_unwrapped: Optional[float] = None
 latest_accel_g: Optional[Tuple[float, float, float]] = None
 latest_raw_lsb: Optional[Tuple[int, int, int]] = None
-latest_raw_ts: Optional[str] = None              # ISO timestamp of latest ASC3 processed
+latest_raw_ts: Optional[str] = None
 
 running_event = threading.Event()
-last_hemi = 1  # MODIF: dernier hémisphère utilisé (+1 ou -1)
 
 # ---------------- Utilities ----------------
 def _now_iso() -> str:
@@ -69,23 +67,34 @@ def lsb_to_g(ax_lsb: int, ay_lsb: int, az_lsb: int) -> Tuple[float, float, float
     return ax_lsb / SENSITIVITY, ay_lsb / SENSITIVITY, az_lsb / SENSITIVITY
 
 def circular_distance(a: float, b: float) -> float:
-    """Minimal absolute circular distance between angles a and b (both in degrees)."""
     return abs((a - b + 180.0) % 360.0 - 180.0)
 
 # ---------------- Angle computation ----------------
 def compute_theta_signed(ax_g: float, ay_g: float, az_g: float) -> float:
-    """
-    Compute signed theta in degrees (approx range -90..+90).
-    theta = atan2(ax, sqrt(ay^2 + az^2))
-    """
     eps = 1e-12
-    theta_deg = math.degrees(math.atan2(ax_g, math.sqrt(ay_g*ay_g + az_g*az_g + eps)))
-    return theta_deg  # signed
+    return math.degrees(math.atan2(ax_g, math.sqrt(ay_g*ay_g + az_g*az_g + eps)))
+
+def compute_theta_extended(ax_g: float, ay_g: float, az_g: float, prev_theta_ext: Optional[float]) -> float:
+    """
+    Theta extended: remap 0..90 -> 0..180 or 0..-180 using az sign
+    """
+    theta_signed = compute_theta_signed(ax_g, ay_g, az_g)
+    Z_HYST = 0.02
+    if prev_theta_ext is None:
+        prev_theta_ext = theta_signed
+    if az_g < -Z_HYST:
+        # hemisphere “back”
+        if theta_signed >= 0:
+            theta_ext = 180.0 - theta_signed
+        else:
+            theta_ext = -180.0 - theta_signed
+    elif az_g > Z_HYST:
+        theta_ext = theta_signed
+    else:
+        theta_ext = prev_theta_ext
+    return theta_ext
 
 def compute_psi_base(ax_g: float, ay_g: float, az_g: float) -> float:
-    """
-    Compute a psi candidate in degrees normalized to [0, 360).
-    """
     eps = 1e-12
     alpha_psi = math.degrees(math.atan2(ay_g, math.sqrt(ax_g*ax_g + az_g*az_g + eps)))
     if az_g < 0.0:
@@ -94,29 +103,10 @@ def compute_psi_base(ax_g: float, ay_g: float, az_g: float) -> float:
         psi = alpha_psi
     return psi % 360.0
 
-# ---------------- MODIF: theta_extended avec signe de Z ----------------
-def compute_theta_extended(ax_g: float, ay_g: float, az_g: float) -> float:
-    global last_hemi
-    theta_signed = compute_theta_signed(ax_g, ay_g, az_g)
-
-    # Hystérésis pour le signe de Z
-    if az_g > Z_HYST:
-        hemi = 1
-    elif az_g < -Z_HYST:
-        hemi = -1
-    else:
-        hemi = last_hemi  # conserver le dernier hémisphère si proche de 0
-    last_hemi = hemi
-
-    theta_ext = theta_signed * hemi
-    return theta_ext
-
 # ---------------- ASC3 parsing & accel reader ----------------
 def parse_asc3_line(line: str) -> Optional[Tuple[int, int, int]]:
     parts = line.strip().split()
-    if len(parts) < 5:
-        return None
-    if parts[0] != "ASC3":
+    if len(parts) < 5 or parts[0] != "ASC3":
         return None
     try:
         ax = int(parts[2])
@@ -134,7 +124,6 @@ def accel_reader_thread(sock: socket.socket):
         try:
             data = sock.recv(4096)
             if not data:
-                print("[AccelReader] remote closed")
                 running_event.clear()
                 break
             buf += data.decode(errors="ignore")
@@ -148,31 +137,20 @@ def accel_reader_thread(sock: socket.socket):
                 ax_g, ay_g, az_g = lsb_to_g(ax_lsb, ay_lsb, az_lsb)
 
                 theta_signed = compute_theta_signed(ax_g, ay_g, az_g)
-                theta_ext = compute_theta_extended(ax_g, ay_g, az_g)  # MODIF
-                psi_base = compute_psi_base(ax_g, ay_g, az_g)  # 0..360
+                with accel_lock:
+                    theta_ext = compute_theta_extended(ax_g, ay_g, az_g, latest_theta_extended)
+                    latest_theta_extended = theta_ext
+
+                psi_base = compute_psi_base(ax_g, ay_g, az_g)
 
                 with accel_lock:
                     prev_unwrapped = latest_psi_unwrapped
-
-                    # Build the two base candidates (because of 180° ambiguity when az flips)
                     candidates_base = [psi_base % 360.0, (psi_base + 180.0) % 360.0]
-
-                    chosen_unwrapped = None
-                    if prev_unwrapped is None:
-                        chosen_unwrapped = candidates_base[0]
-                    else:
-                        best_diff = None
-                        for b in candidates_base:
-                            k = round((prev_unwrapped - b) / 360.0)
-                            unwrapped = b + 360.0 * k
-                            diff = abs(unwrapped - prev_unwrapped)
-                            if best_diff is None or diff < best_diff:
-                                best_diff = diff
-                                chosen_unwrapped = unwrapped
-
-                    # Update shared state
+                    chosen_unwrapped = candidates_base[0] if prev_unwrapped is None else min(
+                        (b + 360.0*round((prev_unwrapped-b)/360.0) for b in candidates_base),
+                        key=lambda u: abs(u-prev_unwrapped)
+                    )
                     latest_theta = theta_signed
-                    latest_theta_extended = theta_ext  # MODIF
                     latest_psi_unwrapped = chosen_unwrapped
                     latest_accel_g = (ax_g, ay_g, az_g)
                     latest_raw_lsb = (ax_lsb, ay_lsb, az_lsb)
@@ -201,9 +179,8 @@ def wait_for_settle(timeout: float = SETTLE_TIMEOUT,
 
         norm = math.sqrt(accel[0]**2 + accel[1]**2 + accel[2]**2)
         if last_norm is None or abs(norm - last_norm) <= tol:
-            if stable_start is None:
-                stable_start = time.time()
-            elif time.time() - stable_start >= stable_duration:
+            stable_start = stable_start or time.time()
+            if time.time() - stable_start >= stable_duration:
                 return True
         else:
             stable_start = None
@@ -242,252 +219,174 @@ class SerialStub:
 
 def build_serial_obj(serial_port: str = SERIAL_PORT, baud: int = BAUDRATE):
     try:
-        import serial  # type: ignore
+        import serial
         ser = serial.Serial(serial_port, baud, timeout=1.0)
         time.sleep(0.1)
-        print(f"[Main] opened serial {serial_port} @ {baud}")
         return ser
-    except Exception as e:
-        print(f"[Main] Could not open serial port {serial_port}: {e}")
-        print("[Main] falling back to SerialStub (no motor control will occur)")
+    except Exception:
         return SerialStub()
 
 # ---------------- Control routines ----------------
 def move_theta(target: float, ser_obj, theta_cmd_holder: dict, rapid_return: bool = False):
-    """
-    Move theta with coarse open-loop timing followed by fine correction using accel feedback.
-    MODIF: rapid_return=True allows faster movement pour 180->0 et -180->0
-    """
-    print(f"\n→ move_theta: target={target:.1f}° (cmd was {theta_cmd_holder['theta_cmd']:.1f}°)")
     delta_cmd = target - theta_cmd_holder["theta_cmd"]
     if abs(delta_cmd) < 0.1:
-        print("  already at commanded theta")
         return
 
     direction = 1 if delta_cmd > 0 else -1
     abs_delta = abs(delta_cmd)
-    t_est = abs_delta / max(OMEGA_EST, 1e-6)
-
-    if rapid_return:
-        t_coarse = min(t_est * 0.5, 20.0)  # MODIF: retour rapide, mais pas instantané
-    else:
-        t_coarse = min(t_est * 1.1, 90.0)
-
+    omega = RAPID_RETURN_SPEED if rapid_return else OMEGA_EST
+    t_est = abs_delta / max(omega, 1e-6)
+    t_coarse = min(t_est * 1.1, 90.0)
     send_command(ser_obj, f"?m1={direction * MOTOR_SPEED}")
     t0 = time.time()
     stopped = False
-
-    while running_event.is_set() and (time.time() - t0) < t_coarse * 2.0:
+    while running_event.is_set() and (time.time()-t0) < t_coarse*2.0:
         with accel_lock:
-            th = latest_theta_extended  # MODIF: utiliser theta_extended pour contrôle
-        if th is not None:
-            err = target - th
-            if abs(err) < 3.0:
-                stop_all(ser_obj)
-                stopped = True
-                break
+            th = latest_theta_extended
+        if th is not None and abs(target - th) < 3.0:
+            stop_all(ser_obj)
+            stopped = True
+            break
         time.sleep(CONTROL_PERIOD)
-
     if not stopped:
         stop_all(ser_obj)
 
     # Fine correction
     with accel_lock:
         accel = latest_accel_g
-    reliable = accel is not None and (ACCEL_NORM_MIN <= math.sqrt(accel[0]**2 + accel[1]**2 + accel[2]**2) <= ACCEL_NORM_MAX)
-    if not reliable:
-        print("  accel unreliable for fine correction -> accept coarse result")
-        theta_cmd_holder["theta_cmd"] = target
-        time.sleep(0.5)
-        return
-
-    fine_start = time.time()
-    fine_timeout = 30.0
-    while running_event.is_set() and (time.time() - fine_start) < fine_timeout:
-        with accel_lock:
-            th = latest_theta_extended  # MODIF
-        if th is None:
-            print("  lost accel during fine correction")
-            break
-        err = target - th
-        if abs(err) <= ANGLE_TOL:
-            break
-        cmd = KP_FINE * err
-        cmd = max(min(cmd, MOTOR_SPEED), -MOTOR_SPEED)
-        send_command(ser_obj, f"?m1={int(round(cmd))}")
-        time.sleep(CONTROL_PERIOD)
-
+    reliable = accel is not None and ACCEL_NORM_MIN <= math.sqrt(accel[0]**2 + accel[1]**2 + accel[2]**2) <= ACCEL_NORM_MAX
+    if reliable:
+        fine_start = time.time()
+        while running_event.is_set() and time.time()-fine_start < 30.0:
+            with accel_lock:
+                th = latest_theta_extended
+            if th is None:
+                break
+            err = target - th
+            if abs(err) <= ANGLE_TOL:
+                break
+            cmd = KP_FINE * err
+            cmd = max(min(cmd, MOTOR_SPEED), -MOTOR_SPEED)
+            send_command(ser_obj, f"?m1={int(round(cmd))}")
+            time.sleep(CONTROL_PERIOD)
     stop_all(ser_obj)
     theta_cmd_holder["theta_cmd"] = target
     wait_for_settle(timeout=2.0, stable_duration=0.4, tol=STABLE_TOL)
-    print(f"  theta_cmd updated -> {theta_cmd_holder['theta_cmd']:.1f}°")
 
-# ---------------- PSI sweep (records unwrapped psi) ----------------
+# ---------------- Recalibration ----------------
+def recalibrate_theta_step(theta_target: float, ser_obj, theta_cmd_holder: dict,
+                           N_samples: int = 10, epsilon: float = 1.5):
+    samples: List[float] = []
+    for _ in range(N_samples):
+        with accel_lock:
+            th = latest_theta_extended
+        if th is not None:
+            samples.append(th)
+        time.sleep(0.01)
+    if not samples:
+        return
+    mean_theta = sum(samples)/len(samples)
+    err = theta_target - mean_theta
+    if abs(err) > epsilon:
+        move_theta(theta_target, ser_obj, theta_cmd_holder)
+
+# ---------------- PSI sweep ----------------
 def sweep_psi_stepwise(direction: int, theta_deg: float, ser_obj, dataset: List[List]):
-    print(f"→ sweep_psi_stepwise {'CW' if direction>0 else 'CCW'} at theta_cmd {theta_deg:.1f}°")
     t_step = PSI_STEP / max(OMEGA_EST, 1e-6)
     t_step = min(t_step, 60.0)
-
     for k in range(N_PSI_STEPS):
         if not running_event.is_set():
             break
-        send_command(ser_obj, f"?m2={direction * MOTOR_SPEED}")
+        send_command(ser_obj, f"?m2={direction*MOTOR_SPEED}")
         time.sleep(t_step)
         stop_all(ser_obj)
-
-        stable = wait_for_settle(timeout=SETTLE_TIMEOUT, stable_duration=STABLE_DURATION, tol=STABLE_TOL)
+        wait_for_settle(timeout=SETTLE_TIMEOUT, stable_duration=STABLE_DURATION, tol=STABLE_TOL)
         with accel_lock:
             psi_unwrapped = latest_psi_unwrapped
-            theta_meas = latest_theta_extended  # MODIF
+            theta_meas = latest_theta_extended
             accel = latest_accel_g
             raw = latest_raw_lsb
             raw_ts = latest_raw_ts
-
         log_time = raw_ts if raw_ts is not None else _now_iso()
-
-        if not stable:
-            print(f"  Step {k+1}: warning - accel did not settle in time")
-        if psi_unwrapped is None or theta_meas is None or raw is None:
-            dataset.append([log_time, theta_deg, theta_meas, psi_unwrapped, None, None, None])
-        else:
+        if accel is not None and theta_meas is not None and psi_unwrapped is not None and raw is not None:
             normg = math.sqrt(accel[0]**2 + accel[1]**2 + accel[2]**2)
             dataset.append([log_time, theta_deg, theta_meas, psi_unwrapped, raw[0], raw[1], raw[2], normg])
-            print(f"  Step {k+1}/{N_PSI_STEPS} | Psi_unwrapped={psi_unwrapped:.1f}° | Theta_meas={theta_meas:.1f}° | |g|={normg:.3f}")
-
-    print("→ psi sweep done\n")
+        recalibrate_theta_step(theta_deg, ser_obj, {"theta_cmd": theta_deg})  # recalibration
 
 # ---------------- Dataset IO ----------------
 def save_dataset_csv(dataset: List[List], prefix: str = "scan_dataset") -> Optional[str]:
     if not dataset:
-        print("[I/O] dataset empty, nothing to save")
         return None
     fname = f"{prefix}_{int(time.time())}.csv"
     try:
         with open(fname, "w", newline="") as f:
             writer = csv.writer(f)
-            writer.writerow(["time_utc", "theta_cmd_deg", "theta_meas_deg", "psi_unwrapped_deg", "x_lsb", "y_lsb", "z_lsb", "norm_g"])
+            writer.writerow(["time_utc","theta_cmd_deg","theta_meas_deg","psi_unwrapped_deg","x_lsb","y_lsb","z_lsb","norm_g"])
             writer.writerows(dataset)
-        print(f"[I/O] dataset saved to {fname}")
         return fname
-    except Exception as e:
-        print(f"[I/O] could not save dataset: {e}")
+    except Exception:
         return None
 
-# ---------------- Top-level custom sequence ----------------
+# ---------------- Top-level sequence ----------------
 def run_scan_sequence(host: str, port: int, ser_obj):
     running_event.set()
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
-        print(f"[Main] connecting to accel {host}:{port} ...")
         sock.connect((host, port))
-    except Exception as e:
-        print(f"[Main] accel connect error: {e}")
+    except Exception:
         running_event.clear()
         return
-
     reader = threading.Thread(target=accel_reader_thread, args=(sock,), daemon=True)
     reader.start()
 
     theta_cmd_holder = {"theta_cmd": 0.0}
     dataset: List[List] = []
-    saved_fname: Optional[str] = None
+
+    sequence = [
+        {"theta":0.0,"psi_sweep":False,"psi_dir":1},
+        {"theta":90.0,"psi_sweep":False,"psi_dir":1},
+        {"theta":180.0,"psi_sweep":True,"psi_dir":1},  # étendu jusqu'à 180
+        {"theta":0.0,"psi_sweep":False,"psi_dir":1,"rapid_return":True},
+        {"theta":-180.0,"psi_sweep":True,"psi_dir":-1},
+        {"theta":0.0,"psi_sweep":False,"psi_dir":1,"rapid_return":True}
+    ]
 
     try:
-        stop_all(ser_obj)
-        time.sleep(0.1)
-
-        # MODIF: nouvelle séquence avec retour rapide
-        sequence = [
-            {"theta": 0.0,   "psi_sweep": False, "psi_dir": 1},
-            {"theta": 90.0,  "psi_sweep": False, "psi_dir": 1},
-            {"theta": 60.0,  "psi_sweep": True,  "psi_dir": 1},
-            {"theta": 30.0,  "psi_sweep": True,  "psi_dir": -1},
-            {"theta": 0.0,   "psi_sweep": False, "psi_dir": 1, "rapid_return": True},   # retour rapide 180->0
-            {"theta": -30.0, "psi_sweep": True,  "psi_dir": -1},
-            {"theta": -60.0, "psi_sweep": True,  "psi_dir": 1},
-            {"theta": -90.0, "psi_sweep": False, "psi_dir": 1, "rapid_return": True},  # retour rapide -180->0
-            {"theta": 0.0,   "psi_sweep": False, "psi_dir": 1},
-        ]
-
-        for idx, step in enumerate(sequence):
+        for step in sequence:
             target_theta = step["theta"]
             psi_sweep = step.get("psi_sweep", False)
             psi_dir = step.get("psi_dir", 1)
-            rapid_return = step.get("rapid_return", False)  # MODIF
+            rapid_return = step.get("rapid_return", False)
 
-            print(f"\n=== Step {idx+1}/{len(sequence)}: Move theta={target_theta}°, sweep psi={psi_sweep}, rapid_return={rapid_return} ===")
-            # Move theta (signed, non-circular)
             move_theta(target_theta, ser_obj, theta_cmd_holder, rapid_return=rapid_return)
-
             if psi_sweep:
                 sweep_psi_stepwise(psi_dir, target_theta, ser_obj, dataset)
             else:
-                stable = wait_for_settle(timeout=SETTLE_TIMEOUT, stable_duration=STABLE_DURATION, tol=STABLE_TOL)
-                with accel_lock:
-                    theta_meas = latest_theta_extended  # MODIF
-                    psi_unwrapped = latest_psi_unwrapped
-                    accel = latest_accel_g
-                    raw = latest_raw_lsb
-                    raw_ts = latest_raw_ts
+                wait_for_settle()
+                recalibrate_theta_step(target_theta, ser_obj, theta_cmd_holder)
 
-                log_time = raw_ts if raw_ts is not None else _now_iso()
-                if accel is not None and theta_meas is not None and psi_unwrapped is not None and raw is not None:
-                    normg = math.sqrt(accel[0]**2 + accel[1]**2 + accel[2]**2)
-                    dataset.append([log_time, target_theta, theta_meas, psi_unwrapped, raw[0], raw[1], raw[2], normg])
-                    print(f"  Recorded | Theta={theta_meas:.1f}°, Psi_unwrapped={psi_unwrapped:.1f}°, |g|={normg:.3f}")
-                else:
-                    print("  Warning: missing accelerometer data for logging")
-
-        print("\n[Main] Custom sequence complete")
-        saved_fname = save_dataset_csv(dataset, prefix="scan_dataset")
-
-    except KeyboardInterrupt:
-        print("[Main] interrupted by user — saving partial dataset")
-        saved_fname = save_dataset_csv(dataset, prefix="partial_scan")
-    except Exception as e:
-        print(f"[Main] unexpected error: {e} — saving partial dataset")
-        saved_fname = save_dataset_csv(dataset, prefix="error_scan")
-        raise
     finally:
         running_event.clear()
         stop_all(ser_obj)
-        time.sleep(0.05)
-        try:
-            sock.close()
-        except Exception:
-            pass
-        if hasattr(ser_obj, "close"):
-            try:
-                ser_obj.close()
-            except Exception:
-                pass
+        try: sock.close()
+        except Exception: pass
+        if hasattr(ser_obj,"close"): ser_obj.close()
         reader.join(timeout=1.0)
-        print("[Main] shutdown")
-        if saved_fname:
-            print(f"[Main] dataset file: {saved_fname}")
+        save_dataset_csv(dataset)
 
 # ---------------- CLI ----------------
 def parse_args():
-    p = argparse.ArgumentParser(description="Accelerometer pilot (theta [-90,90], theta_extended for ±180 return, psi unwrapped)")
-    p.add_argument("--host", default=HOST, help="Accelerometer host")
-    p.add_argument("--port", type=int, default=PORT, help="Accelerometer port")
-    p.add_argument("--serial", default=SERIAL_PORT, help="Serial port for motor controller")
-    p.add_argument("--baud", type=int, default=BAUDRATE, help="Serial baudrate")
+    p = argparse.ArgumentParser(description="Accelerometer pilot ±180° theta_extended")
+    p.add_argument("--host", default=HOST)
+    p.add_argument("--port", type=int, default=PORT)
+    p.add_argument("--serial", default=SERIAL_PORT)
+    p.add_argument("--baud", type=int, default=BAUDRATE)
     return p.parse_args()
 
 def main():
     args = parse_args()
     ser_obj = build_serial_obj(args.serial, args.baud)
-    try:
-        run_scan_sequence(args.host, args.port, ser_obj)
-    except Exception as e:
-        print(f"[Main] fatal: {e}")
-    finally:
-        if hasattr(ser_obj, "close"):
-            try:
-                ser_obj.close()
-            except Exception:
-                pass
+    run_scan_sequence(args.host, args.port, ser_obj)
 
 if __name__ == "__main__":
     main()
