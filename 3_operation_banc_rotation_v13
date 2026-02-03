@@ -343,13 +343,17 @@ def run_scan_sequence(host: str, port: int, ser_obj):
     dataset: List[List] = []
 
     sequence = [
-        {"theta":0.0,"psi_sweep":False,"psi_dir":1},
-        {"theta":90.0,"psi_sweep":False,"psi_dir":1},
-        {"theta":180.0,"psi_sweep":True,"psi_dir":1},  # étendu jusqu'à 180
-        {"theta":0.0,"psi_sweep":False,"psi_dir":1,"rapid_return":True},
-        {"theta":-180.0,"psi_sweep":True,"psi_dir":-1},
-        {"theta":0.0,"psi_sweep":False,"psi_dir":1,"rapid_return":True}
+        {"theta": 0.0,   "psi_sweep": False, "psi_dir": 1},
+        {"theta": 90.0,  "psi_sweep": False, "psi_dir": 1},
+        {"theta": 60.0,  "psi_sweep": True,  "psi_dir": 1},
+        {"theta": 30.0,  "psi_sweep": True,  "psi_dir": -1},
+        {"theta": 0.0,   "psi_sweep": True,  "psi_dir": 1, "rapid_return": True},
+        {"theta": -30.0, "psi_sweep": True,  "psi_dir": -1},
+        {"theta": -60.0, "psi_sweep": True,  "psi_dir": 1},
+        {"theta": -90.0, "psi_sweep": False, "psi_dir": 1},
+        {"theta": 0.0,   "psi_sweep": False, "psi_dir": 1, "rapid_return": True}
     ]
+
 
     try:
         for step in sequence:
