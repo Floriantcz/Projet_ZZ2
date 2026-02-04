@@ -1,6 +1,4 @@
-#Dans cette fonction je souhaite rajouter la calibration à 
-#à la fonction de florian
-
+#!/usr/bin/env python3
 import argparse
 import csv
 import math
@@ -10,71 +8,41 @@ import time
 from datetime import datetime
 from typing import List, Optional, Tuple
 
-# ---------------- Config ----------------
+# ------------------- CONFIGURATION FUSIONNÉE -----------------------
 HOST = "192.168.4.1"
 PORT = 3535
-SERIAL_PORT = "/dev/ttyACM1"
+SERIAL_PORT = "COM3"  # À ajuster selon votre OS
 BAUDRATE = 115200
 
-SENSITIVITY = 256000.0  # LSB/g
-MOTOR_SPEED = 30
-OMEGA_EST = 8.04  # deg/s @ MOTOR_SPEED
+SENSITIVITY = 256000.0
 
-
-KP_FINE = 2.0
-KP = 2.5
-
-
-
-STOP_THRESHOLD = 0.9 # degrees. Ici le moteur s'arrête dès que l'erreur es inférieure 
-SLOW_THRESHOLD = 1  
-
-
-MAX_SPEED = 30
-MIN_SPEED = 15
-
+# --- Paramètres d'asservissement (Indispensables) ---
+KP = 2.5               # Gain proportionnel
+MAX_SPEED = 30         # Vitesse max moteur
+MIN_SPEED = 15         # Vitesse min pour vaincre les frottements
+STOP_THRESHOLD = 0.5   # Précision d'arrêt (degrés)
 STABLE_REQUIRED = 10   # Nombre de lectures stables avant de valider
 CONTROL_PERIOD = 0.05  # 50ms
 
-
-#ANGLE_TOL = 1.0
-CONTROL_PERIOD = 0.05
 SETTLE_TIMEOUT = 8.0
-#STABLE_DURATION = 1.5
 STABLE_TOL = 0.008
-#SOCKET_TIMEOUT = 1.0
+OMEGA_EST = 8.04       # Estimation pour les mouvements longs
 
-OMEGA_EST = 8.04
-
-# ------------------- shared state ------------------------
+# ------------------- ÉTAT PARTAGÉ ------------------------
 accel_lock = threading.Lock()
 latest_theta = None
 latest_psi_unwrapped = None
 latest_accel_g = None
 latest_raw_lsb = None
 latest_raw_ts = None
-latest_raw_ts = None
 running_event = threading.Event()
 
-# ------------------- CONNECTIONS -------------------------
-print(f"Connecting to accelerometer {HOST}:{PORT}...")
-sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-sock.connect((HOST, PORT))
-sock.settimeout(1)
-print("Accelerometer connected.")
-
-print("Connecting to motor controller...")
-ser = serial.Serial(SERIAL_PORT, BAUDRATE, timeout=1)
-time.sleep(2)
-print("Motor controller connected.")
-
-#------Helpers--------
-
+# ------------------- CALCULS & LECTURE -------------------
 def _now_iso() -> str:
     return datetime.utcnow().isoformat(timespec="microseconds") + "Z"
 
 def lsb_to_g(ax_lsb, ay_lsb, az_lsb):
-    return ax_lsb / SENSITIVITY, ay_lsb / SENSITIVITY, az_lsb / SENSITIVITY 
+    return ax_lsb / SENSITIVITY, ay_lsb / SENSITIVITY, az_lsb / SENSITIVITY
 
 def compute_angles_precise(ax_g, ay_g, az_g):
     eps = 1e-12
@@ -114,11 +82,10 @@ def accel_reader_thread(sock: socket.socket):
                     latest_theta = theta
                     latest_accel_g = (ax_g, ay_g, az_g)
                     latest_raw_lsb = (ax_lsb, ay_lsb, az_lsb)
-                    latest_raw_ts = _nom_iso()
-    except: continue
+                    latest_raw_ts = _now_iso()
+        except: continue
 
-
-#--New fonction d'asservissement hehe
+# ------------------- FONCTION D'ASSERVISSEMENT --------------------
 def move_to_angle_closed_loop(target, motor_id):
     """
     FONCTION CLÉ : Asservissement en boucle fermée.
@@ -162,7 +129,14 @@ def move_to_angle_closed_loop(target, motor_id):
         
         time.sleep(CONTROL_PERIOD)
 
+# ------------------- HELPERS MOTEUR -------------------
+def send_command(cmd):
+    try:
+        ser.write((cmd + "\n").encode())
+        ser.flush()
+    except: pass
 
+# ------------------- LOGIQUE DE BALAYAGE -------------------
 def sweep_psi_zigzag_asservi(theta_deg, dataset, start_pos, step_deg=30.0):
     target_end = -180.0 if start_pos > 0 else 180.0
     direction = -1 if target_end < start_pos else 1
@@ -190,7 +164,6 @@ def sweep_psi_zigzag_asservi(theta_deg, dataset, start_pos, step_deg=30.0):
             current_target += direction * step_deg
 
     return target_end
-
 
 def run_scan_sequence():
     running_event.set()
@@ -235,3 +208,5 @@ def run_scan_sequence():
         running_event.clear()
         ser.close()
         sock.close()
+
+# (Ajoutez les imports et initialisations nécessaires pour sock et ser avant run_scan_sequence)
