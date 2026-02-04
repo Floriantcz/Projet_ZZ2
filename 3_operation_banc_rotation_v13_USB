@@ -1,0 +1,287 @@
+#!/usr/bin/env python3
+"""
+Accelerometer calibration bench pilot - Full USB Version (Zigzag)
+Config:
+ - Motor control: Serial port 1
+ - Accelerometer data: Serial port 2 (USB)
+"""
+
+import csv
+import math
+import threading
+import time
+from datetime import datetime
+from typing import List, Optional, Tuple
+
+# --- Configuration des Ports Série ---
+MOTOR_SERIAL_PORT = "COM7"    # Port du banc rotatif
+ACCEL_SERIAL_PORT = "COM8"    # Port USB de l'accéléromètre
+BAUDRATE = 115200
+
+# --- Paramètres Physiques ---
+SENSITIVITY = 256000.0  # LSB/g
+MOTOR_SPEED = 30
+OMEGA_EST = 8.04        # deg/s @ MOTOR_SPEED
+KP_FINE = 2.0
+ANGLE_TOL = 1.0
+CONTROL_PERIOD = 0.05
+SETTLE_TIMEOUT = 8.0
+STABLE_DURATION = 1.5
+STABLE_TOL = 0.008
+
+# --- État partagé ---
+accel_lock = threading.Lock()
+latest_theta: Optional[float] = None
+latest_psi_unwrapped: Optional[float] = None
+latest_accel_g: Optional[Tuple[float, float, float]] = None
+latest_raw_lsb: Optional[Tuple[int, int, int]] = None
+latest_raw_ts: Optional[str] = None
+running_event = threading.Event()
+
+# ---------------- Utilitaires ----------------
+
+def _now_iso() -> str:
+    return datetime.utcnow().isoformat(timespec="microseconds") + "Z"
+
+def lsb_to_g(ax_lsb: int, ay_lsb: int, az_lsb: int) -> Tuple[float, float, float]:
+    return ax_lsb / SENSITIVITY, ay_lsb / SENSITIVITY, az_lsb / SENSITIVITY
+
+def compute_theta_signed(ax_g: float, ay_g: float, az_g: float) -> float:
+    eps = 1e-12
+    return math.degrees(math.atan2(ax_g, math.sqrt(ay_g*ay_g + az_g*az_g + eps)))
+
+def compute_psi_base(ax_g: float, ay_g: float, az_g: float) -> float:
+    eps = 1e-12
+    alpha_psi = math.degrees(math.atan2(ay_g, math.sqrt(ax_g*ax_g + az_g*az_g + eps)))
+    psi = 180.0 - alpha_psi if az_g < 0.0 else alpha_psi
+    return psi % 360.0
+
+def parse_asc3_line(line: str) -> Optional[Tuple[int, int, int]]:
+    parts = line.strip().split()
+    if len(parts) < 5 or parts[0] != "ASC3": return None
+    try: return int(parts[2]), int(parts[3]), int(parts[4])
+    except ValueError: return None
+
+# ---------------- Lecteur USB Capteur ----------------
+
+def accel_usb_reader_thread(port: str, baud: int):
+    """Lit les données de l'accéléromètre via le port USB série."""
+    global latest_theta, latest_psi_unwrapped, latest_accel_g, latest_raw_lsb, latest_raw_ts
+    import serial
+    
+    try:
+        ser_accel = serial.Serial(port, baud, timeout=1.0)
+        print(f"[USB Sensor] Connected to {port}")
+    except Exception as e:
+        print(f"[USB Sensor] Critical Error: {e}")
+        return
+
+    buf = ""
+    while running_event.is_set():
+        try:
+            if ser_accel.in_waiting > 0:
+                data = ser_accel.read(ser_accel.in_waiting).decode(errors="ignore")
+                buf += data
+                if "\n" in buf:
+                    lines = buf.split("\n")
+                    buf = lines[-1]
+                    for line in lines[:-1]:
+                        parsed = parse_asc3_line(line)
+                        if not parsed: continue
+                        
+                        ax_lsb, ay_lsb, az_lsb = parsed
+                        ax_g, ay_g, az_g = lsb_to_g(ax_lsb, ay_lsb, az_lsb)
+                        theta_signed = compute_theta_signed(ax_g, ay_g, az_g)
+                        psi_base = compute_psi_base(ax_g, ay_g, az_g)
+                        
+                        with accel_lock:
+                            prev_unwrapped = latest_psi_unwrapped
+                            if prev_unwrapped is None: 
+                                chosen_unwrapped = psi_base
+                            else:
+                                k = round((prev_unwrapped - psi_base) / 360.0)
+                                chosen_unwrapped = psi_base + 360.0 * k
+                            
+                            latest_theta = theta_signed
+                            latest_psi_unwrapped = chosen_unwrapped
+                            latest_accel_g = (ax_g, ay_g, az_g)
+                            latest_raw_lsb = (ax_lsb, ay_lsb, az_lsb)
+                            latest_raw_ts = _now_iso()
+        except Exception as e:
+            print(f"[USB Sensor] Read error: {e}")
+            time.sleep(0.1)
+    
+    ser_accel.close()
+
+# ---------------- Wait for Settle ----------------
+
+def wait_for_settle(timeout: float = SETTLE_TIMEOUT, stable_duration: float = STABLE_DURATION, tol: float = STABLE_TOL) -> bool:
+    t_start = time.time()
+    stable_start = None
+    last_norm = None
+    while running_event.is_set():
+        with accel_lock:
+            accel = latest_accel_g
+        if accel is None:
+            if time.time() - t_start > timeout: return False
+            time.sleep(CONTROL_PERIOD)
+            continue
+        norm = math.sqrt(accel[0]**2 + accel[1]**2 + accel[2]**2)
+        if last_norm is None or abs(norm - last_norm) <= tol:
+            if stable_start is None: stable_start = time.time()
+            elif time.time() - stable_start >= stable_duration: return True
+        else: stable_start = None
+        last_norm = norm
+        if time.time() - t_start > timeout: return False
+        time.sleep(CONTROL_PERIOD)
+    return False
+
+# ---------------- Motor Helpers ----------------
+
+def send_command(ser_obj, cmd: str):
+    try:
+        ser_obj.write((cmd + "\n").encode())
+    except Exception as e: 
+        print(f"[Motor] Command error: {e}")
+
+def stop_all(ser_obj):
+    send_command(ser_obj, "?stopall")
+
+# ---------------- Control Routines ----------------
+
+def move_theta(target: float, ser_obj, theta_cmd_holder: dict):
+    print(f"\n→ move_theta: {target:.1f}°")
+    with accel_lock:
+        current_theta = latest_theta if latest_theta is not None else theta_cmd_holder["theta_cmd"]
+    delta = target - current_theta
+    if abs(delta) < 0.2: return
+    direction = 1 if delta > 0 else -1
+    t_coarse = min(abs(delta) / max(OMEGA_EST, 1e-6) * 1.1, 90.0)
+    send_command(ser_obj, f"?m1={direction * MOTOR_SPEED}")
+    t0 = time.time()
+    while running_event.is_set() and (time.time() - t0) < t_coarse:
+        with accel_lock:
+            th = latest_theta
+        if th is not None and abs(target - th) < 3.0: break
+        time.sleep(CONTROL_PERIOD)
+    stop_all(ser_obj)
+    fine_start = time.time()
+    while running_event.is_set() and (time.time() - fine_start) < 15.0:
+        with accel_lock:
+            th = latest_theta
+        if th is None or abs(target - th) <= ANGLE_TOL: break
+        cmd = max(min(KP_FINE * (target - th), MOTOR_SPEED), -MOTOR_SPEED)
+        send_command(ser_obj, f"?m1={int(round(cmd))}")
+        time.sleep(CONTROL_PERIOD)
+    stop_all(ser_obj)
+    theta_cmd_holder["theta_cmd"] = target
+    wait_for_settle(timeout=2.0, stable_duration=0.5)
+
+def move_psi_direct(target: float, ser_obj):
+    with accel_lock:
+        current = latest_psi_unwrapped if latest_psi_unwrapped is not None else 0.0
+    delta = target - current
+    if abs(delta) < 1.0: return
+    print(f"→ move_psi_direct: to {target:.1f}°")
+    direction = 1 if delta > 0 else -1
+    t_move = abs(delta) / max(OMEGA_EST, 1e-6)
+    send_command(ser_obj, f"?m2={direction * MOTOR_SPEED}")
+    time.sleep(t_move)
+    stop_all(ser_obj)
+    wait_for_settle(timeout=4.0, stable_duration=0.8)
+
+def sweep_psi_zigzag(theta_deg: float, ser_obj, dataset: List[List], start_pos: float, step_deg: float = 30.0) -> float:
+    target_end = -180.0 if start_pos > 0 else 180.0
+    direction = -1 if target_end < start_pos else 1
+    print(f"→ sweep_psi_zigzag: Theta={theta_deg}°, Sweep {start_pos}° to {target_end}°")
+    
+    current_target = start_pos
+    num_steps = int(360 / step_deg)
+    
+    for i in range(num_steps + 1):
+        wait_for_settle()
+        with accel_lock:
+            psi_meas, theta_meas, accel, raw, ts = latest_psi_unwrapped, latest_theta, latest_accel_g, latest_raw_lsb, latest_raw_ts
+        
+        if accel and raw:
+            normg = math.sqrt(accel[0]**2 + accel[1]**2 + accel[2]**2)
+            dataset.append([ts or _now_iso(), theta_deg, theta_meas, psi_meas, raw[0], raw[1], raw[2], normg])
+            print(f"   [Data] Psi={psi_meas:.1f}°")
+
+        if i < num_steps:
+            current_target += direction * step_deg
+            send_command(ser_obj, f"?m2={direction * MOTOR_SPEED}")
+            time.sleep(step_deg / max(OMEGA_EST, 1e-6))
+            stop_all(ser_obj)
+
+    return target_end
+
+# ---------------- Main Logic ----------------
+
+def run_sequence():
+    import serial
+    running_event.set()
+    
+    # 1. Ouverture des ports
+    try:
+        ser_motors = serial.Serial(MOTOR_SERIAL_PORT, BAUDRATE, timeout=1.0)
+    except:
+        print(f"Failed to open Motor port {MOTOR_SERIAL_PORT}"); return
+
+    # 2. Lancement du thread capteur (USB)
+    reader = threading.Thread(target=accel_usb_reader_thread, args=(ACCEL_SERIAL_PORT, BAUDRATE), daemon=True)
+    reader.start()
+
+    theta_cmd_holder = {"theta_cmd": 0.0}
+    dataset = []
+    current_psi_side = 180.0 # On commence à +180
+
+    try:
+        stop_all(ser_motors)
+        sequence = [
+            {"theta": 0.0,   "psi_sweep": False},
+            {"theta": 90.0,  "psi_sweep": False},
+            {"theta": 60.0,  "psi_sweep": True},
+            {"theta": 30.0,  "psi_sweep": True},
+            {"theta": 0.0,   "psi_sweep": True},
+            {"theta": -30.0, "psi_sweep": True},
+            {"theta": -60.0, "psi_sweep": True},
+            {"theta": -90.0, "psi_sweep": False},
+            {"theta": 0.0,   "psi_sweep": False},
+        ]
+
+        for idx, step in enumerate(sequence):
+            move_theta(step["theta"], ser_motors, theta_cmd_holder)
+            
+            if idx == 0:
+                move_psi_direct(180.0, ser_motors)
+
+            if step["psi_sweep"]:
+                current_psi_side = sweep_psi_zigzag(step["theta"], ser_motors, dataset, current_psi_side)
+            else:
+                wait_for_settle()
+                with accel_lock:
+                    if latest_accel_g:
+                        normg = math.sqrt(sum(x**2 for x in latest_accel_g))
+                        dataset.append([latest_raw_ts or _now_iso(), step["theta"], latest_theta, latest_psi_unwrapped, 
+                                        latest_raw_lsb[0], latest_raw_lsb[1], latest_raw_lsb[2], normg])
+                print(f"   [Data Stat] Psi={latest_psi_unwrapped:.1f}°")
+
+        move_psi_direct(0.0, ser_motors)
+        
+        # Sauvegarde
+        fname = f"scan_usb_zigzag_{int(time.time())}.csv"
+        with open(fname, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["time_utc","theta_cmd_deg","theta_meas_deg","psi_unwrapped_deg","x_lsb","y_lsb","z_lsb","norm_g"])
+            writer.writerows(dataset)
+        print(f"Fichier sauvegardé : {fname}")
+
+    finally:
+        running_event.clear()
+        stop_all(ser_motors)
+        ser_motors.close()
+        reader.join(1.0)
+
+if __name__ == "__main__":
+    run_sequence()
