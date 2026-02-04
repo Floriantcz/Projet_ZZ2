@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Accelerometer calibration bench pilot
+Accelerometer calibration bench pilot - Zigzag Version
 Modifications:
  - Initial jump to Psi = +180°
- - Stepwise sweep from +180° down to -180° for each theta step
+ - Alternating sweeps (+180 to -180, then -180 to +180) to save time
  - Final return to Psi = 0°
 """
 
@@ -19,18 +19,15 @@ from typing import List, Optional, Tuple
 # ---------------- Config ----------------
 HOST = "192.168.4.1"
 PORT = 3535
-
 SERIAL_PORT = "COM7"
 BAUDRATE = 115200
 
 SENSITIVITY = 256000.0  # LSB/g
 MOTOR_SPEED = 30
 OMEGA_EST = 8.04  # deg/s @ MOTOR_SPEED
-
 KP_FINE = 2.0
 ANGLE_TOL = 1.0
 CONTROL_PERIOD = 0.05
-
 SETTLE_TIMEOUT = 8.0
 STABLE_DURATION = 1.5
 STABLE_TOL = 0.008
@@ -43,7 +40,6 @@ latest_psi_unwrapped: Optional[float] = None
 latest_accel_g: Optional[Tuple[float, float, float]] = None
 latest_raw_lsb: Optional[Tuple[int, int, int]] = None
 latest_raw_ts: Optional[str] = None
-
 running_event = threading.Event()
 
 # ---------------- Utilities ----------------
@@ -53,7 +49,6 @@ def _now_iso() -> str:
 def lsb_to_g(ax_lsb: int, ay_lsb: int, az_lsb: int) -> Tuple[float, float, float]:
     return ax_lsb / SENSITIVITY, ay_lsb / SENSITIVITY, az_lsb / SENSITIVITY
 
-# ---------------- Angle computation ----------------
 def compute_theta_signed(ax_g: float, ay_g: float, az_g: float) -> float:
     eps = 1e-12
     return math.degrees(math.atan2(ax_g, math.sqrt(ay_g*ay_g + az_g*az_g + eps)))
@@ -67,15 +62,11 @@ def compute_psi_base(ax_g: float, ay_g: float, az_g: float) -> float:
         psi = alpha_psi
     return psi % 360.0
 
-# ---------------- ASC3 parsing ----------------
 def parse_asc3_line(line: str) -> Optional[Tuple[int, int, int]]:
     parts = line.strip().split()
-    if len(parts) < 5 or parts[0] != "ASC3":
-        return None
-    try:
-        return int(parts[2]), int(parts[3]), int(parts[4])
-    except ValueError:
-        return None
+    if len(parts) < 5 or parts[0] != "ASC3": return None
+    try: return int(parts[2]), int(parts[3]), int(parts[4])
+    except ValueError: return None
 
 def accel_reader_thread(sock: socket.socket):
     global latest_theta, latest_psi_unwrapped, latest_accel_g, latest_raw_lsb, latest_raw_ts
@@ -93,19 +84,14 @@ def accel_reader_thread(sock: socket.socket):
                 if not parsed: continue
                 ax_lsb, ay_lsb, az_lsb = parsed
                 ax_g, ay_g, az_g = lsb_to_g(ax_lsb, ay_lsb, az_lsb)
-
                 theta_signed = compute_theta_signed(ax_g, ay_g, az_g)
                 psi_base = compute_psi_base(ax_g, ay_g, az_g)
-
                 with accel_lock:
                     prev_unwrapped = latest_psi_unwrapped
-                    # Logic simple d'unwrapping basée sur la proximité
-                    if prev_unwrapped is None:
-                        chosen_unwrapped = psi_base
+                    if prev_unwrapped is None: chosen_unwrapped = psi_base
                     else:
                         k = round((prev_unwrapped - psi_base) / 360.0)
                         chosen_unwrapped = psi_base + 360.0 * k
-
                     latest_theta = theta_signed
                     latest_psi_unwrapped = chosen_unwrapped
                     latest_accel_g = (ax_g, ay_g, az_g)
@@ -116,7 +102,6 @@ def accel_reader_thread(sock: socket.socket):
             print(f"[AccelReader] error: {e}")
             time.sleep(0.05)
 
-# ---------------- Settling wait ----------------
 def wait_for_settle(timeout: float = SETTLE_TIMEOUT, stable_duration: float = STABLE_DURATION, tol: float = STABLE_TOL) -> bool:
     t_start = time.time()
     stable_start: Optional[float] = None
@@ -158,22 +143,18 @@ def build_serial_obj(serial_port: str, baud: int):
         import serial
         return serial.Serial(serial_port, baud, timeout=1.0)
     except Exception:
-        print("[Main] Falling back to SerialStub")
         return SerialStub()
 
 # ---------------- Control routines ----------------
 
 def move_theta(target: float, ser_obj, theta_cmd_holder: dict):
-    print(f"\n→ move_theta: target={target:.1f}°")
+    print(f"\n→ move_theta: {target:.1f}°")
     with accel_lock:
         current_theta = latest_theta if latest_theta is not None else theta_cmd_holder["theta_cmd"]
-    
     delta = target - current_theta
     if abs(delta) < 0.2: return
-
     direction = 1 if delta > 0 else -1
     t_coarse = min(abs(delta) / max(OMEGA_EST, 1e-6) * 1.1, 90.0)
-
     send_command(ser_obj, f"?m1={direction * MOTOR_SPEED}")
     t0 = time.time()
     while running_event.is_set() and (time.time() - t0) < t_coarse:
@@ -182,8 +163,6 @@ def move_theta(target: float, ser_obj, theta_cmd_holder: dict):
         if th is not None and abs(target - th) < 3.0: break
         time.sleep(CONTROL_PERIOD)
     stop_all(ser_obj)
-
-    # Fine tuning
     fine_start = time.time()
     while running_event.is_set() and (time.time() - fine_start) < 15.0:
         with accel_lock:
@@ -192,78 +171,65 @@ def move_theta(target: float, ser_obj, theta_cmd_holder: dict):
         cmd = max(min(KP_FINE * (target - th), MOTOR_SPEED), -MOTOR_SPEED)
         send_command(ser_obj, f"?m1={int(round(cmd))}")
         time.sleep(CONTROL_PERIOD)
-    
     stop_all(ser_obj)
     theta_cmd_holder["theta_cmd"] = target
     wait_for_settle(timeout=2.0, stable_duration=0.5)
 
 def move_psi_direct(target: float, ser_obj):
-    """Déplacement rapide vers une cible sans enregistrement."""
+    """Déplacement rapide sans enregistrement."""
     with accel_lock:
         current = latest_psi_unwrapped if latest_psi_unwrapped is not None else 0.0
     delta = target - current
     if abs(delta) < 1.0: return
-    
-    print(f"→ move_psi_direct: target={target:.1f}° (from {current:.1f}°)")
+    print(f"→ move_psi_direct: to {target:.1f}°")
     direction = 1 if delta > 0 else -1
     t_move = abs(delta) / max(OMEGA_EST, 1e-6)
-    
     send_command(ser_obj, f"?m2={direction * MOTOR_SPEED}")
     time.sleep(t_move)
     stop_all(ser_obj)
     wait_for_settle(timeout=4.0, stable_duration=0.8)
 
-def sweep_psi_stepwise_descending(theta_deg: float, ser_obj, dataset: List[List], step_deg: float = 30.0):
-    """Balayage de +180° à -180° par pas de 30°."""
-    print(f"→ sweep_psi: Starting descending sweep +180° to -180° at Theta={theta_deg}°")
+def sweep_psi_zigzag(theta_deg: float, ser_obj, dataset: List[List], start_pos: float, step_deg: float = 30.0) -> float:
+    """
+    Effectue un balayage de start_pos vers la position opposée.
+    Si start_pos = 180, descend vers -180.
+    Si start_pos = -180, monte vers 180.
+    Retourne la position finale du balayage.
+    """
+    target_end = -180.0 if start_pos > 0 else 180.0
+    direction = -1 if target_end < start_pos else 1
     
-    # On s'assure d'être au point de départ
-    move_psi_direct(180.0, ser_obj)
+    print(f"→ sweep_psi_zigzag: Theta={theta_deg}°, Sweep {start_pos}° to {target_end}°")
     
-    current_target = 180.0
-    while current_target >= -180.0:
-        # 1. Attente stabilisation
+    current_target = start_pos
+    num_steps = int(360 / step_deg)
+    
+    for i in range(num_steps + 1):
+        # 1. Mesure au point actuel
         wait_for_settle(timeout=SETTLE_TIMEOUT, stable_duration=STABLE_DURATION, tol=STABLE_TOL)
-        
-        # 2. Enregistrement
         with accel_lock:
-            psi_meas = latest_psi_unwrapped
-            theta_meas = latest_theta
-            accel = latest_accel_g
-            raw = latest_raw_lsb
-            ts = latest_raw_ts
+            psi_meas, theta_meas, accel, raw, ts = latest_psi_unwrapped, latest_theta, latest_accel_g, latest_raw_lsb, latest_raw_ts
         
         if accel and raw:
             normg = math.sqrt(accel[0]**2 + accel[1]**2 + accel[2]**2)
             dataset.append([ts or _now_iso(), theta_deg, theta_meas, psi_meas, raw[0], raw[1], raw[2], normg])
-            print(f"   [Data] Psi={psi_meas:.1f}° | |g|={normg:.3f}")
-        
-        # 3. Mouvement vers le prochain point
-        if current_target <= -180.0: break
-        current_target -= step_deg
-        
-        t_step = step_deg / max(OMEGA_EST, 1e-6)
-        send_command(ser_obj, f"?m2={-1 * MOTOR_SPEED}") # Négatif pour descendre
-        time.sleep(t_step)
-        stop_all(ser_obj)
+            print(f"   [Data] Psi={psi_meas:.1f}°")
 
-# ---------------- Dataset IO ----------------
-def save_dataset_csv(dataset: List[List], prefix: str = "scan_dataset") -> Optional[str]:
-    if not dataset: return None
-    fname = f"{prefix}_{int(time.time())}.csv"
-    with open(fname, "w", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow(["time_utc","theta_cmd_deg","theta_meas_deg","psi_unwrapped_deg","x_lsb","y_lsb","z_lsb","norm_g"])
-        writer.writerows(dataset)
-    print(f"[I/O] Saved to {fname}")
-    return fname
+        # 2. Mouvement vers le palier suivant
+        if i < num_steps:
+            current_target += direction * step_deg
+            t_step = step_deg / max(OMEGA_EST, 1e-6)
+            send_command(ser_obj, f"?m2={direction * MOTOR_SPEED}")
+            time.sleep(t_step)
+            stop_all(ser_obj)
 
-# ---------------- Top-level sequence ----------------
+    return target_end  # On finit à l'opposé
+
+# ---------------- Main Logic ----------------
 def run_scan_sequence(host: str, port: int, ser_obj):
     running_event.set()
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
-        print(f"[Main] Connecting to {host}:{port}")
         sock.connect((host, port))
     except Exception as e:
         print(f"Connect error: {e}"); return
@@ -273,6 +239,7 @@ def run_scan_sequence(host: str, port: int, ser_obj):
 
     theta_cmd_holder = {"theta_cmd": 0.0}
     dataset = []
+    current_psi_side = 180.0 # Position de départ attendue pour le premier sweep
 
     try:
         stop_all(ser_obj)
@@ -292,42 +259,43 @@ def run_scan_sequence(host: str, port: int, ser_obj):
             target_theta = step["theta"]
             print(f"\n=== STEP {idx+1}/{len(sequence)}: Theta {target_theta}° ===")
             
-            # Positionnement Theta
+            # 1. Positionnement Theta
             move_theta(target_theta, ser_obj, theta_cmd_holder)
 
-            # Cas du tout début : Aller direct à +180°
+            # 2. Condition initiale : Aller à +180° au premier pas
             if idx == 0:
+                print("Initial positioning to +180°...")
                 move_psi_direct(180.0, ser_obj)
 
+            # 3. Balayage ou Mesure simple
             if step["psi_sweep"]:
-                sweep_psi_stepwise_descending(target_theta, ser_obj, dataset)
+                # Effectue le balayage et met à jour current_psi_side pour le prochain palier
+                current_psi_side = sweep_psi_zigzag(target_theta, ser_obj, dataset, current_psi_side)
             else:
                 wait_for_settle()
                 with accel_lock:
+                    normg = math.sqrt(sum(x**2 for x in latest_accel_g)) if latest_accel_g else 0
                     dataset.append([latest_raw_ts or _now_iso(), target_theta, latest_theta, latest_psi_unwrapped, 
-                                    latest_raw_lsb[0], latest_raw_lsb[1], latest_raw_lsb[2], 
-                                    math.sqrt(sum(x**2 for x in latest_accel_g))])
+                                    latest_raw_lsb[0], latest_raw_lsb[1], latest_raw_lsb[2], normg])
                 print(f"   [Data Stat] Psi={latest_psi_unwrapped:.1f}°")
 
-        # Cas de la toute fin : Retour direct à 0°
+        # 4. Fin : Retour à 0°
         print("\n=== FINAL POSITIONING: Return Psi to 0° ===")
         move_psi_direct(0.0, ser_obj)
-
-        save_dataset_csv(dataset)
+        
+        fname = f"scan_zigzag_{int(time.time())}.csv"
+        with open(fname, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["time_utc","theta_cmd_deg","theta_meas_deg","psi_unwrapped_deg","x_lsb","y_lsb","z_lsb","norm_g"])
+            writer.writerows(dataset)
+        print(f"Done. Saved to {fname}")
 
     finally:
         running_event.clear()
         stop_all(ser_obj)
         sock.close()
         reader.join(1.0)
-        print("[Main] Shutdown")
-
-def main():
-    args = argparse.ArgumentParser()
-    args.add_argument("--serial", default=SERIAL_PORT)
-    parsed = args.parse_args()
-    ser = build_serial_obj(parsed.serial, BAUDRATE)
-    run_scan_sequence(HOST, PORT, ser)
 
 if __name__ == "__main__":
-    main()
+    ser = build_serial_obj(SERIAL_PORT, BAUDRATE)
+    run_scan_sequence(HOST, PORT, ser)
