@@ -8,3 +8,7 @@ Livrables minimum : un programme Python fonctionnel, pilotage du banc (simulatio
 
 ## Choix techniques définitifs
 Langage : Python / Interface : ? / Données : CSV / Versioning : Git
+
+## Liens vers le rapport et le support de soutenance du projet
+Rapport de projet : https://docs.google.com/document/d/1_kKjAyLE-e-RXJlc_ORKOiXeyP7mpX3b517K855sOJg/edit?hl=fr&tab=t.0
+Supper de soutenance : https://docs.google.com/presentation/d/1kBoRbRlJ7N_Ucs1YHLqjI1pYs6XmRFJ-XxNK_td1rao/edit?slide=id.p#slide=id.p
