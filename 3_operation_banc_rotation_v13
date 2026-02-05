@@ -53,14 +53,12 @@ def compute_theta_signed(ax_g: float, ay_g: float, az_g: float) -> float:
     eps = 1e-12
     return math.degrees(math.atan2(ax_g, math.sqrt(ay_g*ay_g + az_g*az_g + eps)))
 
-def compute_psi_base(ax_g: float, ay_g: float, az_g: float) -> float:
-    eps = 1e-12
-    alpha_psi = math.degrees(math.atan2(ay_g, math.sqrt(ax_g*ax_g + az_g*az_g + eps)))
-    if az_g < 0.0:
-        psi = 180.0 - alpha_psi
-    else:
-        psi = alpha_psi
-    return psi % 360.0
+def compute_psi_signed(ax_g: float, ay_g: float, az_g: float) -> float:
+    """Psi réel moteur [-180,180]"""
+    return math.degrees(math.atan2(ay_g, az_g))
+
+def normalize_angle(angle: float) -> float:
+    return (angle + 180.0) % 360.0 - 180.0
 
 def parse_asc3_line(line: str) -> Optional[Tuple[int, int, int]]:
     parts = line.strip().split()
@@ -87,34 +85,51 @@ def load_psi_steps(path: str) -> list:
 
 def accel_reader_thread(sock: socket.socket):
     global latest_theta, latest_psi_unwrapped, latest_accel_g, latest_raw_lsb, latest_raw_ts
+
     buf = ""
     sock.settimeout(SOCKET_TIMEOUT)
+
     while running_event.is_set():
         try:
             data = sock.recv(4096)
-            if not data: break
+            if not data:
+                break
+
             buf += data.decode(errors="ignore")
             lines = buf.split("\n")
             buf = lines[-1]
+
             for line in lines[:-1]:
                 parsed = parse_asc3_line(line)
-                if not parsed: continue
+                if not parsed:
+                    continue
+
                 ax_lsb, ay_lsb, az_lsb = parsed
                 ax_g, ay_g, az_g = lsb_to_g(ax_lsb, ay_lsb, az_lsb)
+
+                # Theta inchangé
                 theta_signed = compute_theta_signed(ax_g, ay_g, az_g)
-                psi_base = compute_psi_base(ax_g, ay_g, az_g)
+
+                psi_signed = math.degrees(math.atan2(ay_g, az_g))
+                psi_signed = (psi_signed + 180.0) % 360.0 - 180.0
+
                 with accel_lock:
-                    prev_unwrapped = latest_psi_unwrapped
-                    if prev_unwrapped is None: chosen_unwrapped = psi_base
+                    prev = latest_psi_unwrapped
+
+                    if prev is None:
+                        psi_unwrapped = psi_signed
                     else:
-                        k = round((prev_unwrapped - psi_base) / 360.0)
-                        chosen_unwrapped = psi_base + 360.0 * k
+                        k = round((prev - psi_signed) / 360.0)
+                        psi_unwrapped = psi_signed + 360.0 * k
+
                     latest_theta = theta_signed
-                    latest_psi_unwrapped = chosen_unwrapped
+                    latest_psi_unwrapped = psi_unwrapped
                     latest_accel_g = (ax_g, ay_g, az_g)
                     latest_raw_lsb = (ax_lsb, ay_lsb, az_lsb)
                     latest_raw_ts = _now_iso()
-        except socket.timeout: continue
+
+        except socket.timeout:
+            continue
         except Exception as e:
             print(f"[AccelReader] error: {e}")
             time.sleep(0.05)
@@ -205,24 +220,17 @@ def move_psi_direct(target: float, ser_obj):
     stop_all(ser_obj)
     wait_for_settle(timeout=4.0, stable_duration=0.8)
 
-def sweep_psi_variable(theta_deg, ser_obj, dataset, start_pos, psi_steps):
-    psi_cmd = start_pos
-    direction = -1 if start_pos > 0 else 1
-
+def sweep_psi_variable(theta_deg: float, ser_obj, dataset: list, start_pos: float, psi_steps: list) -> float:
+    current = start_pos
+    direction = -1 if start_pos > 0 else 1  # sens du mouvement
+    
     print(f"→ sweep_psi_variable: Theta={theta_deg}°, start={start_pos}°")
-
+    
     for step_deg in psi_steps:
-        # ---- mouvement ----
-        psi_cmd += direction * step_deg
-        t_move = step_deg / max(OMEGA_EST, 1e-6)
-        send_command(ser_obj, f"?m2={direction * MOTOR_SPEED}")
-        time.sleep(t_move)
-        stop_all(ser_obj)
-
-        # ---- stabilisation ----
+        # attendre que le système soit stable
         wait_for_settle()
 
-        # ---- mesure ----
+        # lire l'accélération
         with accel_lock:
             psi_meas = latest_psi_unwrapped
             theta_meas = latest_theta
@@ -232,21 +240,18 @@ def sweep_psi_variable(theta_deg, ser_obj, dataset, start_pos, psi_steps):
 
         if accel and raw:
             normg = math.sqrt(sum(a*a for a in accel))
-            dataset.append([
-                ts or _now_iso(),
-                theta_deg,
-                theta_meas,
-                psi_meas,
-                raw[0], raw[1], raw[2],
-                normg
-            ])
+            dataset.append([ts or _now_iso(), theta_deg, theta_meas, psi_meas,
+                            raw[0], raw[1], raw[2], normg])
+            print(f"   [Data] Psi={psi_meas:.1f}° (step={step_deg}°)")
 
-            print(
-                f"   [Data] ψ_cmd={psi_cmd:.1f}° | ψ_meas={psi_meas:.1f}° | step={step_deg}°"
-            )
+        # déplacer le moteur
+        current += direction * step_deg
+        t_move = step_deg / max(OMEGA_EST, 1e-6)
+        send_command(ser_obj, f"?m2={direction * MOTOR_SPEED}")
+        time.sleep(t_move)
+        stop_all(ser_obj)
 
-    return psi_cmd
-
+    return current
 
 # ---------------- Main Logic ----------------
 def run_scan_sequence(host: str, port: int, ser_obj):
