@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
-Accelerometer calibration bench pilot - Zigzag Version
+Accelerometer calibration bench pilot - Zigzag Version (Dynamic Step)
 Modifications:
- - Initial jump to Psi = +180°
- - Alternating sweeps (+180 to -180, then -180 to +180) to save time
- - Final return to Psi = 0°
+ - Ajout d'une saisie utilisateur pour le pas de Psi
+ - Validation que le pas est un diviseur de 360
 """
 
 import argparse
@@ -45,6 +44,26 @@ running_event = threading.Event()
 # ---------------- Utilities ----------------
 def _now_iso() -> str:
     return datetime.utcnow().isoformat(timespec="microseconds") + "Z"
+
+def get_valid_step() -> float:
+    """Demande à l'utilisateur un pas et vérifie s'il est diviseur de 360."""
+    while True:
+        try:
+            val_str = input("\nEntrez le pas souhaité pour Psi en degrés (ex: 10, 30, 45) : ")
+            val = float(val_str)
+            if val <= 0:
+                print("Le pas doit être un nombre positif.")
+                continue
+            
+            # Vérification si c'est un diviseur de 360
+            # On utilise modulo sur le résultat de la division pour gérer les flottants (ex: 22.5)
+            if (360.0 / val).is_integer():
+                print(f"Pas de {val}° validé ({(360/val):.0f} paliers par tour).")
+                return val
+            else:
+                print(f"Erreur : {val} n'est pas un diviseur de 360. Veuillez réessayer.")
+        except ValueError:
+            print("Entrée invalide. Veuillez saisir un nombre.")
 
 def lsb_to_g(ax_lsb: int, ay_lsb: int, az_lsb: int) -> Tuple[float, float, float]:
     return ax_lsb / SENSITIVITY, ay_lsb / SENSITIVITY, az_lsb / SENSITIVITY
@@ -176,7 +195,6 @@ def move_theta(target: float, ser_obj, theta_cmd_holder: dict):
     wait_for_settle(timeout=2.0, stable_duration=0.5)
 
 def move_psi_direct(target: float, ser_obj):
-    """Déplacement rapide sans enregistrement."""
     with accel_lock:
         current = latest_psi_unwrapped if latest_psi_unwrapped is not None else 0.0
     delta = target - current
@@ -189,23 +207,16 @@ def move_psi_direct(target: float, ser_obj):
     stop_all(ser_obj)
     wait_for_settle(timeout=4.0, stable_duration=0.8)
 
-def sweep_psi_zigzag(theta_deg: float, ser_obj, dataset: List[List], start_pos: float, step_deg: float = 30.0) -> float:
-    """
-    Effectue un balayage de start_pos vers la position opposée.
-    Si start_pos = 180, descend vers -180.
-    Si start_pos = -180, monte vers 180.
-    Retourne la position finale du balayage.
-    """
+def sweep_psi_zigzag(theta_deg: float, ser_obj, dataset: List[List], start_pos: float, step_deg: float) -> float:
     target_end = -180.0 if start_pos > 0 else 180.0
     direction = -1 if target_end < start_pos else 1
     
-    print(f"→ sweep_psi_zigzag: Theta={theta_deg}°, Sweep {start_pos}° to {target_end}°")
+    print(f"→ sweep_psi_zigzag: Theta={theta_deg}°, Sweep {start_pos}° to {target_end}° (Step={step_deg}°)")
     
     current_target = start_pos
     num_steps = int(360 / step_deg)
     
     for i in range(num_steps + 1):
-        # 1. Mesure au point actuel
         wait_for_settle(timeout=SETTLE_TIMEOUT, stable_duration=STABLE_DURATION, tol=STABLE_TOL)
         with accel_lock:
             psi_meas, theta_meas, accel, raw, ts = latest_psi_unwrapped, latest_theta, latest_accel_g, latest_raw_lsb, latest_raw_ts
@@ -215,7 +226,6 @@ def sweep_psi_zigzag(theta_deg: float, ser_obj, dataset: List[List], start_pos: 
             dataset.append([ts or _now_iso(), theta_deg, theta_meas, psi_meas, raw[0], raw[1], raw[2], normg])
             print(f"   [Data] Psi={psi_meas:.1f}°")
 
-        # 2. Mouvement vers le palier suivant
         if i < num_steps:
             current_target += direction * step_deg
             t_step = step_deg / max(OMEGA_EST, 1e-6)
@@ -223,10 +233,13 @@ def sweep_psi_zigzag(theta_deg: float, ser_obj, dataset: List[List], start_pos: 
             time.sleep(t_step)
             stop_all(ser_obj)
 
-    return target_end  # On finit à l'opposé
+    return target_end
 
 # ---------------- Main Logic ----------------
 def run_scan_sequence(host: str, port: int, ser_obj):
+    # --- Nouveau : Récupération du pas avant de commencer ---
+    psi_step = get_valid_step()
+
     running_event.set()
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
@@ -239,7 +252,7 @@ def run_scan_sequence(host: str, port: int, ser_obj):
 
     theta_cmd_holder = {"theta_cmd": 0.0}
     dataset = []
-    current_psi_side = 180.0 # Position de départ attendue pour le premier sweep
+    current_psi_side = 180.0 
 
     try:
         stop_all(ser_obj)
@@ -259,27 +272,24 @@ def run_scan_sequence(host: str, port: int, ser_obj):
             target_theta = step["theta"]
             print(f"\n=== STEP {idx+1}/{len(sequence)}: Theta {target_theta}° ===")
             
-            # 1. Positionnement Theta
             move_theta(target_theta, ser_obj, theta_cmd_holder)
 
-            # 2. Condition initiale : Aller à +180° au premier pas
             if idx == 0:
                 print("Initial positioning to +180°...")
                 move_psi_direct(180.0, ser_obj)
 
-            # 3. Balayage ou Mesure simple
             if step["psi_sweep"]:
-                # Effectue le balayage et met à jour current_psi_side pour le prochain palier
-                current_psi_side = sweep_psi_zigzag(target_theta, ser_obj, dataset, current_psi_side)
+                # Utilisation du pas saisi par l'utilisateur
+                current_psi_side = sweep_psi_zigzag(target_theta, ser_obj, dataset, current_psi_side, step_deg=psi_step)
             else:
                 wait_for_settle()
                 with accel_lock:
-                    normg = math.sqrt(sum(x**2 for x in latest_accel_g)) if latest_accel_g else 0
-                    dataset.append([latest_raw_ts or _now_iso(), target_theta, latest_theta, latest_psi_unwrapped, 
-                                    latest_raw_lsb[0], latest_raw_lsb[1], latest_raw_lsb[2], normg])
-                print(f"   [Data Stat] Psi={latest_psi_unwrapped:.1f}°")
+                    if latest_accel_g:
+                        normg = math.sqrt(sum(x**2 for x in latest_accel_g))
+                        dataset.append([latest_raw_ts or _now_iso(), target_theta, latest_theta, latest_psi_unwrapped, 
+                                        latest_raw_lsb[0], latest_raw_lsb[1], latest_raw_lsb[2], normg])
+                        print(f"   [Data Stat] Psi={latest_psi_unwrapped:.1f}°")
 
-        # 4. Fin : Retour à 0°
         print("\n=== FINAL POSITIONING: Return Psi to 0° ===")
         move_psi_direct(0.0, ser_obj)
         
