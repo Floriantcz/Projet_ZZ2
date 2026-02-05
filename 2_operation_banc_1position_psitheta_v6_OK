@@ -6,28 +6,22 @@ import threading
 import numpy as np
 
 # ------------------- CONFIGURATION -----------------------
-# -------- Accelerometer (TCP) --------
 HOST = '192.168.4.1'
 PORT = 3535
 
-# -------- Motor controller (Serial) --------
 SERIAL_PORT = 'COM7'
 BAUDRATE = 115200
 
-# -------- Accelerometer scaling --------
-SENSITIVITY = 256000     # LSB / g (adjust if needed)
+SENSITIVITY = 256000     # LSB / g
 
-# -------- Control parameters --------
-KP = 2.5   # deg → motor speed gain
+KP = 2.5
 MAX_SPEED = 30
 MIN_SPEED = 15
 
-STOP_THRESHOLD = 0.9     # degrees
-SLOW_THRESHOLD = 1     # degrees
-
-CONTROL_PERIOD = 0.05     # 50 ms
-SETTLE_TIME = 2.0         # seconds
-TIMEOUT = 30              # seconds
+STOP_THRESHOLD = 0.9
+CONTROL_PERIOD = 0.05
+SETTLE_TIME = 2.0
+TIMEOUT = 30
 
 # ------------------- SHARED STATE ------------------------
 accel_lock = threading.Lock()
@@ -56,54 +50,47 @@ def stop_all():
     send_command("?stopall")
 
 def get_accel_lsb():
-    """
-    Reads one ASC3 line and returns (ax, ay, az) in LSB
-    Expected format:
-    ASC3 <timestamp> <x> <y> <z>
-    """
     try:
         raw = sock.recv(1024).decode()
-        lines = raw.split('\n')
-
-        for line in lines:
+        for line in raw.split('\n'):
             if line.startswith('ASC3'):
                 parts = line.strip().split('\t')
                 if len(parts) >= 5:
-                    ax_lsb = int(parts[2])
-                    ay_lsb = int(parts[3])
-                    az_lsb = int(parts[4])
-                    return ax_lsb, ay_lsb, az_lsb
-    except Exception:
+                    return int(parts[2]), int(parts[3]), int(parts[4])
+    except:
         pass
     return None
 
-# LSB → g conversion
-def lsb_to_g(ax_lsb, ay_lsb, az_lsb, sensitivity=SENSITIVITY):
-    ax_g = ax_lsb / sensitivity
-    ay_g = ay_lsb / sensitivity
-    az_g = az_lsb / sensitivity
-    return ax_g, ay_g, az_g
+def lsb_to_g(ax, ay, az):
+    return ax / SENSITIVITY, ay / SENSITIVITY, az / SENSITIVITY
 
-# Angle computation
-def compute_angles(ax_g, ay_g, az_g):
+def normalize_angle(angle):
+    """Angle → [-180, 180]"""
+    return (angle + 180) % 360 - 180
+
+# ------------------- ANGLES (VERSION FIABLE) ----------------
+def compute_angles(ax, ay, az):
     """
-    θ = atan(Ax / sqrt(Ay² + Az²))
-    ψ = atan(Ay / sqrt(Ax² + Az²))
+    Theta ∈ [-90,90]
+    Psi   ∈ [-180,180] (robuste)
     """
     eps = 1e-12
-    theta = np.degrees(np.arctan2(ax_g, np.sqrt(ay_g**2 + az_g**2 + eps)))
-    psi   = np.degrees(np.arctan2(ay_g, np.sqrt(ax_g**2 + az_g**2 + eps)))
+
+    theta = math.degrees(math.atan2(ax, math.sqrt(ay*ay + az*az + eps)))
+    psi   = math.degrees(math.atan2(ay, az))
+    psi   = normalize_angle(psi)
+
     return theta, psi
 
 # ------------------- ACCELEROMETER THREAD ----------------
 def accel_reader():
-    global latest_theta, latest_psi, running
+    global latest_theta, latest_psi
     while running:
         data = get_accel_lsb()
         if data:
             ax_lsb, ay_lsb, az_lsb = data
-            ax_g, ay_g, az_g = lsb_to_g(ax_lsb, ay_lsb, az_lsb)
-            theta, psi = compute_angles(ax_g, ay_g, az_g)
+            ax, ay, az = lsb_to_g(ax_lsb, ay_lsb, az_lsb)
+            theta, psi = compute_angles(ax, ay, az)
 
             with accel_lock:
                 latest_theta = theta
@@ -113,15 +100,10 @@ def accel_reader():
 def move_motor_to_angle(target_angle, motor_id, angle_name):
     print(f"\n--- Moving M{motor_id} to {angle_name} = {target_angle:.2f}° ---")
     start_time = time.time()
-    stable_count = 0
-    STABLE_REQUIRED = 10   # 10 × 50 ms = 0.5 s
 
     while True:
         with accel_lock:
-            if motor_id == 2:
-                current_angle = latest_psi     # Motor 2 → Psi
-            else:
-                current_angle = latest_theta   # Motor 1 → Theta
+            current_angle = latest_psi if motor_id == 2 else latest_theta
 
         if current_angle is None:
             continue
@@ -130,27 +112,18 @@ def move_motor_to_angle(target_angle, motor_id, angle_name):
         print(f"{angle_name} = {current_angle:+.2f}° | error = {error:+.2f}°")
 
         if abs(error) < STOP_THRESHOLD:
-            stable_count += 1
-            if stable_count >= STABLE_REQUIRED:
-                stop_all()
-                print(f"{angle_name} target reached and stabilized.")
-                break
-        else:
-            stable_count = 0
+            stop_all()
+            print(f"{angle_name} target reached.")
+            break
 
-        # ---- PROPORTIONAL CONTROL (SIGNED) ----
         speed = KP * error
-
-        # Clamp speed
         speed = max(min(speed, MAX_SPEED), -MAX_SPEED)
 
-        # Enforce minimum speed (avoid stalling)
         if abs(speed) < MIN_SPEED:
             speed = math.copysign(MIN_SPEED, speed)
 
         send_command(f"?m{motor_id}={int(speed)}")
 
-        # ---- SAFETY TIMEOUT ----
         if time.time() - start_time > TIMEOUT:
             stop_all()
             raise RuntimeError(f"Timeout reaching {angle_name}")
@@ -163,29 +136,21 @@ def move_motor_to_angle(target_angle, motor_id, angle_name):
 try:
     stop_all()
 
-    target_psi   = float(input("Enter target psi (deg): "))
-    target_theta = float(input("Enter target theta (deg): "))
+    target_psi   = float(input("Enter target psi [-180,180]: "))
+    target_theta = float(input("Enter target theta [-90,90]: "))
 
     accel_thread = threading.Thread(target=accel_reader, daemon=True)
     accel_thread.start()
+    time.sleep(1)
 
-    time.sleep(1)  # allow angle initialization
-
-    # ψ → Motor 2
     move_motor_to_angle(target_psi, motor_id=2, angle_name="Psi")
-
-    # θ → Motor 1
-    move_motor_to_angle(target_theta, motor_id=1, angle_name="theta")
+    move_motor_to_angle(target_theta, motor_id=1, angle_name="Theta")
 
     stop_all()
     print("\nOrientation reached successfully.")
-
-except KeyboardInterrupt:
-    print("\nUser interrupted.")
 
 finally:
     running = False
     stop_all()
     ser.close()
     sock.close()
-    
