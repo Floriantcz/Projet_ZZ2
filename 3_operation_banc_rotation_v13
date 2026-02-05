@@ -49,7 +49,7 @@ def get_valid_step() -> float:
     """Demande à l'utilisateur un pas et vérifie s'il est diviseur de 360."""
     while True:
         try:
-            val_str = input("\nEntrez le pas souhaité pour Psi en degrés (ex: 10, 30, 45) : ")
+            val_str = input("\nEntrez le pas souhaité pour Psi en degrés (ex: 10, 12, 15, 18, 20, 22.5, 24, 30, 36, 40, 45, 60, 72, 90) : ")
             val = float(val_str)
             if val <= 0:
                 print("Le pas doit être un nombre positif.")
