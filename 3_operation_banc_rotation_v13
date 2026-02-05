@@ -205,17 +205,24 @@ def move_psi_direct(target: float, ser_obj):
     stop_all(ser_obj)
     wait_for_settle(timeout=4.0, stable_duration=0.8)
 
-def sweep_psi_variable(theta_deg: float, ser_obj, dataset: list, start_pos: float, psi_steps: list) -> float:
-    current = start_pos
-    direction = -1 if start_pos > 0 else 1  # sens du mouvement
-    
+def sweep_psi_variable(theta_deg, ser_obj, dataset, start_pos, psi_steps):
+    psi_cmd = start_pos
+    direction = -1 if start_pos > 0 else 1
+
     print(f"→ sweep_psi_variable: Theta={theta_deg}°, start={start_pos}°")
-    
+
     for step_deg in psi_steps:
-        # attendre que le système soit stable
+        # ---- mouvement ----
+        psi_cmd += direction * step_deg
+        t_move = step_deg / max(OMEGA_EST, 1e-6)
+        send_command(ser_obj, f"?m2={direction * MOTOR_SPEED}")
+        time.sleep(t_move)
+        stop_all(ser_obj)
+
+        # ---- stabilisation ----
         wait_for_settle()
 
-        # lire l'accélération
+        # ---- mesure ----
         with accel_lock:
             psi_meas = latest_psi_unwrapped
             theta_meas = latest_theta
@@ -225,18 +232,21 @@ def sweep_psi_variable(theta_deg: float, ser_obj, dataset: list, start_pos: floa
 
         if accel and raw:
             normg = math.sqrt(sum(a*a for a in accel))
-            dataset.append([ts or _now_iso(), theta_deg, theta_meas, psi_meas,
-                            raw[0], raw[1], raw[2], normg])
-            print(f"   [Data] Psi={psi_meas:.1f}° (step={step_deg}°)")
+            dataset.append([
+                ts or _now_iso(),
+                theta_deg,
+                theta_meas,
+                psi_meas,
+                raw[0], raw[1], raw[2],
+                normg
+            ])
 
-        # déplacer le moteur
-        current += direction * step_deg
-        t_move = step_deg / max(OMEGA_EST, 1e-6)
-        send_command(ser_obj, f"?m2={direction * MOTOR_SPEED}")
-        time.sleep(t_move)
-        stop_all(ser_obj)
+            print(
+                f"   [Data] ψ_cmd={psi_cmd:.1f}° | ψ_meas={psi_meas:.1f}° | step={step_deg}°"
+            )
 
-    return current
+    return psi_cmd
+
 
 # ---------------- Main Logic ----------------
 def run_scan_sequence(host: str, port: int, ser_obj):
