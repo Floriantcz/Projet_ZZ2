@@ -7,6 +7,7 @@ Modifications:
 """
 
 import argparse
+import json
 import csv
 import math
 import socket
@@ -45,26 +46,6 @@ running_event = threading.Event()
 def _now_iso() -> str:
     return datetime.utcnow().isoformat(timespec="microseconds") + "Z"
 
-def get_valid_step() -> float:
-    """Demande à l'utilisateur un pas et vérifie s'il est diviseur de 360."""
-    while True:
-        try:
-            val_str = input("\nEntrez le pas souhaité pour Psi en degrés (ex: 10, 12, 15, 18, 20, 22.5, 24, 30, 36, 40, 45, 60, 72, 90) : ")
-            val = float(val_str)
-            if val <= 0:
-                print("Le pas doit être un nombre positif.")
-                continue
-            
-            # Vérification si c'est un diviseur de 360
-            # On utilise modulo sur le résultat de la division pour gérer les flottants (ex: 22.5)
-            if (360.0 / val).is_integer():
-                print(f"Pas de {val}° validé ({(360/val):.0f} paliers par tour).")
-                return val
-            else:
-                print(f"Erreur : {val} n'est pas un diviseur de 360. Veuillez réessayer.")
-        except ValueError:
-            print("Entrée invalide. Veuillez saisir un nombre.")
-
 def lsb_to_g(ax_lsb: int, ay_lsb: int, az_lsb: int) -> Tuple[float, float, float]:
     return ax_lsb / SENSITIVITY, ay_lsb / SENSITIVITY, az_lsb / SENSITIVITY
 
@@ -86,6 +67,23 @@ def parse_asc3_line(line: str) -> Optional[Tuple[int, int, int]]:
     if len(parts) < 5 or parts[0] != "ASC3": return None
     try: return int(parts[2]), int(parts[3]), int(parts[4])
     except ValueError: return None
+
+import json
+
+def load_psi_steps(path: str) -> list:
+    """Charge la liste des pas de psi depuis un fichier JSON."""
+    try:
+        with open(path, "r") as f:
+            cfg = json.load(f)
+        steps = cfg.get("psi_steps_deg")
+        if not steps or not all(s > 0 for s in steps):
+            raise ValueError("Liste psi_steps_deg invalide")
+        print(f"Configuration ψ chargée: {steps}")
+        return steps
+    except Exception as e:
+        print(f"Erreur lors du chargement du fichier {path}: {e}")
+        raise
+
 
 def accel_reader_thread(sock: socket.socket):
     global latest_theta, latest_psi_unwrapped, latest_accel_g, latest_raw_lsb, latest_raw_ts
@@ -207,38 +205,43 @@ def move_psi_direct(target: float, ser_obj):
     stop_all(ser_obj)
     wait_for_settle(timeout=4.0, stable_duration=0.8)
 
-def sweep_psi_zigzag(theta_deg: float, ser_obj, dataset: List[List], start_pos: float, step_deg: float) -> float:
-    target_end = -180.0 if start_pos > 0 else 180.0
-    direction = -1 if target_end < start_pos else 1
+def sweep_psi_variable(theta_deg: float, ser_obj, dataset: list, start_pos: float, psi_steps: list) -> float:
+    current = start_pos
+    direction = -1 if start_pos > 0 else 1  # sens du mouvement
     
-    print(f"→ sweep_psi_zigzag: Theta={theta_deg}°, Sweep {start_pos}° to {target_end}° (Step={step_deg}°)")
+    print(f"→ sweep_psi_variable: Theta={theta_deg}°, start={start_pos}°")
     
-    current_target = start_pos
-    num_steps = int(360 / step_deg)
-    
-    for i in range(num_steps + 1):
-        wait_for_settle(timeout=SETTLE_TIMEOUT, stable_duration=STABLE_DURATION, tol=STABLE_TOL)
+    for step_deg in psi_steps:
+        # attendre que le système soit stable
+        wait_for_settle()
+
+        # lire l'accélération
         with accel_lock:
-            psi_meas, theta_meas, accel, raw, ts = latest_psi_unwrapped, latest_theta, latest_accel_g, latest_raw_lsb, latest_raw_ts
-        
+            psi_meas = latest_psi_unwrapped
+            theta_meas = latest_theta
+            accel = latest_accel_g
+            raw = latest_raw_lsb
+            ts = latest_raw_ts
+
         if accel and raw:
-            normg = math.sqrt(accel[0]**2 + accel[1]**2 + accel[2]**2)
-            dataset.append([ts or _now_iso(), theta_deg, theta_meas, psi_meas, raw[0], raw[1], raw[2], normg])
-            print(f"   [Data] Psi={psi_meas:.1f}°")
+            normg = math.sqrt(sum(a*a for a in accel))
+            dataset.append([ts or _now_iso(), theta_deg, theta_meas, psi_meas,
+                            raw[0], raw[1], raw[2], normg])
+            print(f"   [Data] Psi={psi_meas:.1f}° (step={step_deg}°)")
 
-        if i < num_steps:
-            current_target += direction * step_deg
-            t_step = step_deg / max(OMEGA_EST, 1e-6)
-            send_command(ser_obj, f"?m2={direction * MOTOR_SPEED}")
-            time.sleep(t_step)
-            stop_all(ser_obj)
+        # déplacer le moteur
+        current += direction * step_deg
+        t_move = step_deg / max(OMEGA_EST, 1e-6)
+        send_command(ser_obj, f"?m2={direction * MOTOR_SPEED}")
+        time.sleep(t_move)
+        stop_all(ser_obj)
 
-    return target_end
+    return current
 
 # ---------------- Main Logic ----------------
 def run_scan_sequence(host: str, port: int, ser_obj):
     # --- Nouveau : Récupération du pas avant de commencer ---
-    psi_step = get_valid_step()
+    psi_steps = load_psi_steps("psi_steps.json")
 
     running_event.set()
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -280,7 +283,7 @@ def run_scan_sequence(host: str, port: int, ser_obj):
 
             if step["psi_sweep"]:
                 # Utilisation du pas saisi par l'utilisateur
-                current_psi_side = sweep_psi_zigzag(target_theta, ser_obj, dataset, current_psi_side, step_deg=psi_step)
+                current_psi_side = sweep_psi_variable(target_theta, ser_obj, dataset, current_psi_side, psi_steps)
             else:
                 wait_for_settle()
                 with accel_lock:
