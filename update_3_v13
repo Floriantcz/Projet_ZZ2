@@ -1,0 +1,253 @@
+#!/usr/bin/env python3
+"""
+Projet SAPIMAC - Banc de Calibration
+Theta : Boucle Ouverte | Psi : Mode Burst (Impulsions) sans lag
+"""
+
+import csv
+import math
+import socket
+import threading
+import time
+from datetime import datetime
+from typing import List, Optional, Tuple
+
+# ------------------- CONFIGURATION -----------------------
+HOST = "192.168.4.1"
+PORT = 3535
+SERIAL_PORT = "/dev/ttyACM1"  # Vérifie bien si c'est ACM0 ou ACM1
+BAUDRATE = 115200
+
+SENSITIVITY = 256000.0
+
+# Paramètres de mouvement
+MOTOR_SPEED_THETA = 30
+OMEGA_EST = 8.04        # deg/s pour Theta
+STOP_THRESHOLD_PSI = 1.4 # Seuil pour éviter le sifflement inutile
+CONTROL_PERIOD = 0.05
+
+# ------------------- ÉTAT PARTAGÉ ------------------------
+accel_lock = threading.Lock()
+latest_theta = None
+latest_psi_unwrapped = None
+latest_accel_g = None
+latest_raw_lsb = None
+latest_raw_ts = None
+running_event = threading.Event()
+
+# ------------------- CALCULS & LECTURE -------------------
+def _now_iso() -> str:
+    return datetime.utcnow().isoformat(timespec="microseconds") + "Z"
+
+def lsb_to_g(ax_lsb, ay_lsb, az_lsb):
+    return ax_lsb / SENSITIVITY, ay_lsb / SENSITIVITY, az_lsb / SENSITIVITY
+
+def compute_angles_precise(ax_g, ay_g, az_g):
+    eps = 1e-12
+    theta = math.degrees(math.atan2(ax_g, math.sqrt(ay_g**2 + az_g**2 + eps)))
+    alpha_psi = math.degrees(math.atan2(ay_g, math.sqrt(ax_g**2 + az_g**2 + eps)))
+    psi_base = (180.0 - alpha_psi if az_g < 0.0 else alpha_psi) % 360.0
+    return theta, psi_base
+
+def update_global_angles(data_block: str):
+    """Décode une ligne ASC3 et met à jour les variables globales."""
+    global latest_theta, latest_psi_unwrapped, latest_accel_g, latest_raw_lsb, latest_raw_ts
+    if not data_block.startswith("ASC3"): return
+    
+    parts = data_block.strip().split()
+    if len(parts) < 5: return
+    
+    ax_lsb, ay_lsb, az_lsb = int(parts[2]), int(parts[3]), int(parts[4])
+    ax_g, ay_g, az_g = lsb_to_g(ax_lsb, ay_lsb, az_lsb)
+    theta, psi_b = compute_angles_precise(ax_g, ay_g, az_g)
+
+    with accel_lock:
+        prev = latest_psi_unwrapped
+        if prev is None: latest_psi_unwrapped = psi_b
+        else:
+            k = round((prev - psi_b) / 360.0)
+            latest_psi_unwrapped = psi_b + 360.0 * k
+        latest_theta = theta
+        latest_accel_g = (ax_g, ay_g, az_g)
+        latest_raw_lsb = (ax_lsb, ay_lsb, az_lsb)
+        latest_raw_ts = _now_iso()
+
+def accel_reader_thread(sock: socket.socket):
+    """Thread de lecture continue (arrière-plan)."""
+    buf = ""
+    while running_event.is_set():
+        try:
+            data = sock.recv(4096).decode(errors="ignore")
+            if not data: break
+            buf += data
+            lines = buf.split("\n")
+            buf = lines[-1]
+            for line in lines[:-1]:
+                update_global_angles(line)
+        except: continue
+
+# ------------------- NETTOYAGE DU LAG --------------------
+def get_fresh_data():
+    """Vide le buffer TCP pour forcer la lecture de la position INSTANTANÉE."""
+    sock.setblocking(False)
+    try:
+        while True:
+            data = sock.recv(4096) # On jette tout ce qui est ancien
+            if not data: break
+            # On traite juste la dernière ligne du dernier paquet pour être à jour
+            last_line = data.decode(errors="ignore").strip().split('\n')[-1]
+            update_global_angles(last_line)
+    except BlockingIOError:
+        pass # Buffer vidé
+    finally:
+        sock.setblocking(True)
+
+# ------------------- FONCTIONS DE MOUVEMENT --------------------
+def send_command(cmd):
+    try:
+        ser.write((cmd + "\n").encode())
+        ser.flush()
+    except: pass
+
+def move_theta_open_loop(target_theta):
+    """Positionnement M1 (Inclinaison) basé sur le temps."""
+    with accel_lock:
+        current = latest_theta if latest_theta is not None else 0.0
+    delta = target_theta - current
+    if abs(delta) < 0.2: return
+
+    print(f"--> Mouvement THETA vers {target_theta}°")
+    direction = 1 if delta > 0 else -1
+    duration = abs(delta) / OMEGA_EST
+    
+    send_command(f"?m1={direction * MOTOR_SPEED_THETA}")
+    time.sleep(duration)
+    send_command("?stopall")
+    time.sleep(1.2)
+
+def move_psi_burst_mode(target_psi):
+    """Mouvement M2 (Pivot) par impulsions pour éliminer les oscillations."""
+    print(f"--> Mode BURST PSI vers {target_psi:.2f}°", flush=True)
+    
+    while running_event.is_set():
+        send_command("?stopall")
+        time.sleep(1.0) # Laisse le temps au banc de se figer et au buffer de se vider
+        
+        get_fresh_data() # Récupère la position REELLE sans lag
+
+        with accel_lock:
+            current = latest_psi_unwrapped
+        
+        if current is None: continue
+        
+        error = target_psi - current
+        abs_error = abs(error)
+        
+        print(f"   Pos: {current:.2f}° | Err: {error:.2f}°", flush=True)
+
+        # Zone morte pour éviter le sifflement à 0.1° d'erreur
+        if abs_error <= STOP_THRESHOLD_PSI:
+            print("   [OK] Position stabilisée.")
+            break
+
+        # Configuration de l'impulsion
+        if abs_error > 15:
+            duration, speed = 0.7, 35
+        elif abs_error > 5:
+            duration, speed = 0.4, 20
+        elif abs_error > 1.5:
+            duration, speed = 0.4, 18
+        else :
+            duration, speed = 0.3, 14 # Petit coup final
+
+        direction = 1 if error > 0 else -1
+        send_command(f"?m2={direction * speed}")
+        time.sleep(duration)
+        send_command("?stopall")
+
+# ------------------- LOGIQUE DE BALAYAGE -------------------
+def sweep_psi_zigzag(theta_deg, dataset, start_pos, step_deg=30.0):
+    target_end = -180.0 if start_pos > 0 else 180.0
+    direction = -1 if target_end < start_pos else 1
+    num_steps = int(360 / step_deg)
+    
+    current_target = start_pos
+    for i in range(num_steps + 1):
+        move_psi_burst_mode(current_target)
+        time.sleep(0.5)
+        with accel_lock:
+            # Capturer les données finales stabilisées
+            psi_meas, th_meas = latest_psi_unwrapped, latest_theta
+            raw, ts, accel = latest_raw_lsb, latest_raw_ts, latest_accel_g
+        
+        if accel:
+            normg = math.sqrt(accel[0]**2 + accel[1]**2 + accel[2]**2)
+            dataset.append([ts, theta_deg, th_meas, psi_meas, raw[0], raw[1], raw[2], normg])
+            print(f"   [MESURE] Psi={psi_meas:.2f}° | Norme={normg:.4f}g")
+
+        if i < num_steps:
+            current_target += direction * step_deg
+    return target_end
+
+def run_scan_sequence():
+    running_event.set()
+    threading.Thread(target=accel_reader_thread, args=(sock,), daemon=True).start()
+    
+    dataset = []
+    current_psi_side = 180.0
+
+    sequence = [
+        {"theta": 0.0, "sweep": False}, {"theta": 90.0, "sweep": False},
+        {"theta": 60.0, "sweep": True}, {"theta": 30.0, "sweep": True},
+        {"theta": 0.0, "sweep": True}, {"theta": -30.0, "sweep": True},
+        {"theta": -60.0, "sweep": True}, {"theta": -90.0, "sweep": False}
+    ]
+
+    try:
+        print("\n--- DEBUT SEQUENCE ---")
+        move_psi_burst_mode(180.0)
+
+        for step in sequence:
+            move_theta_open_loop(step["theta"])
+            if step["sweep"]:
+                current_psi_side = sweep_psi_zigzag(step["theta"], dataset, current_psi_side)
+            else:
+                time.sleep(2.0)
+                # Enregistrement simple
+                with accel_lock:
+                    dataset.append([latest_raw_ts, step["theta"], latest_theta, latest_psi_unwrapped, 
+                                    latest_raw_lsb[0], latest_raw_lsb[1], latest_raw_lsb[2], 1.0])
+
+        move_psi_burst_mode(0.0)
+        
+        # Sauvegarde
+        filename = f"calib_zigzag_{int(time.time())}.csv"
+        with open(filename, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["time","theta_cmd","theta_meas","psi_meas","x","y","z","norm"])
+            writer.writerows(dataset)
+        print(f"\nTerminé ! Fichier : {filename}")
+
+    finally:
+        running_event.clear()
+
+# ------------------- LANCEMENT -------------------
+if __name__ == "__main__":
+    import serial
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(2.0)
+        sock.connect((HOST, PORT))
+        
+        ser = serial.Serial(SERIAL_PORT, BAUDRATE, timeout=1)
+        timSTOP_THRESHOLD_PSIe.sleep(2)
+        
+        run_scan_sequence()
+        
+    except Exception as e:
+        print(f"Erreur Fatale: {e}")
+    finally:
+        send_command("?stopall")
+        ser.close()
+        sock.close()
+        print("Banc SAPIMAC arrêté.")   
