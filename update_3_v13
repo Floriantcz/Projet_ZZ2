@@ -240,8 +240,8 @@ if __name__ == "__main__":
         sock.connect((HOST, PORT))
         
         ser = serial.Serial(SERIAL_PORT, BAUDRATE, timeout=1)
-        timSTOP_THRESHOLD_PSIe.sleep(2)
-        
+        time.sleep(2) # Attend 2 secondes que le port série se stabilise
+                
         run_scan_sequence()
         
     except Exception as e:
