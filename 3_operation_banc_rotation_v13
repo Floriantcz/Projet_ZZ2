@@ -243,6 +243,7 @@ def run_scan_sequence(host: str, port: int, ser_obj):
     reader.start()
 
     theta_cmd_holder = {"theta_cmd": 0.0}
+    psi_cmd_holder = {"psi_cmd": 0.0}
     dataset = []
 
     try:
@@ -260,7 +261,6 @@ def run_scan_sequence(host: str, port: int, ser_obj):
                 move_theta(target_theta, ser_obj, theta_cmd_holder)
                 last_theta = target_theta
 
-            psi_cmd_holder = {"psi_cmd": 0.0}
             move_psi_incremental(target_psi, psi_cmd_holder, ser_obj)
 
             # Attente de stabilisation et capture
