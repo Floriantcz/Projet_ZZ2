@@ -264,7 +264,7 @@ def sweep_psi_variable(theta_deg: float, ser_obj, dataset: list, start_pos: floa
 # ---------------- Main Logic ----------------
 def run_scan_sequence(host: str, port: int, ser_obj):
     # Charger la configuration complète
-    scan_sequence = load_scan_config("scan_config.json")
+    scan_sequence = load_scan_config("psi_steps.json")
 
     running_event.set()
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
