@@ -66,29 +66,22 @@ def parse_asc3_line(line: str) -> Optional[Tuple[int, int, int]]:
     try: return int(parts[2]), int(parts[3]), int(parts[4])
     except ValueError: return None
 
-def load_scan_config(path: str) -> list:
+import json
+
+def load_psi_steps(path: str) -> list:
+    """Charge la liste des pas de psi depuis un fichier JSON."""
     try:
         with open(path, "r") as f:
             cfg = json.load(f)
-
-        seq = cfg.get("scan_sequence")
-        if not seq or not isinstance(seq, list):
-            raise ValueError("scan_sequence invalide")
-
-        for step in seq:
-            if "theta_deg" not in step:
-                raise ValueError("theta_deg manquant")
-            if "psi_steps_deg" in step:
-                steps = step["psi_steps_deg"]
-                if not all(s > 0 for s in steps):
-                    raise ValueError("psi_steps_deg invalide")
-
-        print("Configuration scan chargée avec succès")
-        return seq
-
+        steps = cfg.get("psi_steps_deg")
+        if not steps or not all(s > 0 for s in steps):
+            raise ValueError("Liste psi_steps_deg invalide")
+        print(f"Configuration ψ chargée: {steps}")
+        return steps
     except Exception as e:
-        print(f"Erreur config JSON : {e}")
+        print(f"Erreur lors du chargement du fichier {path}: {e}")
         raise
+
 
 def accel_reader_thread(sock: socket.socket):
     global latest_theta, latest_psi_unwrapped, latest_accel_g, latest_raw_lsb, latest_raw_ts
@@ -247,7 +240,8 @@ def sweep_psi_variable(theta_deg: float, ser_obj, dataset: list, start_pos: floa
 
         if accel and raw:
             normg = math.sqrt(sum(a*a for a in accel))
-            dataset.append([ts or _now_iso(), theta_deg, theta_meas, psi_meas, raw[0], raw[1], raw[2], normg])
+            dataset.append([ts or _now_iso(), theta_deg, theta_meas, psi_meas,
+                            raw[0], raw[1], raw[2], normg])
             print(f"   [Data] Psi={psi_meas:.1f}° (step={step_deg}°)")
 
         # déplacer le moteur
@@ -261,88 +255,66 @@ def sweep_psi_variable(theta_deg: float, ser_obj, dataset: list, start_pos: floa
 
 # ---------------- Main Logic ----------------
 def run_scan_sequence(host: str, port: int, ser_obj):
-    scan_sequence = load_scan_config("psi_steps.json")
+    # --- Nouveau : Récupération du pas avant de commencer ---
+    psi_steps = load_psi_steps("psi_steps.json")
 
     running_event.set()
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
         sock.connect((host, port))
     except Exception as e:
-        print(f"Connect error: {e}")
-        return
+        print(f"Connect error: {e}"); return
 
     reader = threading.Thread(target=accel_reader_thread, args=(sock,), daemon=True)
     reader.start()
 
     theta_cmd_holder = {"theta_cmd": 0.0}
     dataset = []
-
-    # Position initiale psi
-    current_psi = 180.0
+    current_psi_side = 180.0 
 
     try:
         stop_all(ser_obj)
+        sequence = [
+            {"theta": 0.0,   "psi_sweep": False},
+            {"theta": 90.0,  "psi_sweep": False},
+            {"theta": 60.0,  "psi_sweep": True},
+            {"theta": 30.0,  "psi_sweep": True},
+            {"theta": 0.0,   "psi_sweep": True},
+            {"theta": -30.0, "psi_sweep": True},
+            {"theta": -60.0, "psi_sweep": True},
+            {"theta": -90.0, "psi_sweep": False},
+            {"theta": 0.0,   "psi_sweep": False},
+        ]
 
-        # Placer l'accéléromètre à 180° au départ
-        print("\n=== INITIAL POSITIONING: Psi = 180° ===")
-        move_psi_direct(current_psi, ser_obj)
+        for idx, step in enumerate(sequence):
+            target_theta = step["theta"]
+            print(f"\n=== STEP {idx+1}/{len(sequence)}: Theta {target_theta}° ===")
+            
+            move_theta(target_theta, ser_obj, theta_cmd_holder)
 
-        # Boucle sur chaque step
-        for idx, step in enumerate(scan_sequence):
-            theta = step["theta_deg"]
-            psi_steps = step.get("psi_steps_deg", [])
+            if idx == 0:
+                print("Initial positioning to +180°...")
+                move_psi_direct(180.0, ser_obj)
 
-            print(f"\n=== STEP {idx+1}/{len(scan_sequence)} : Theta={theta}° ===")
-
-            # Déplacer θ
-            move_theta(theta, ser_obj, theta_cmd_holder)
-
-            if psi_steps:
-                # Balayage de ψ cumulatif
-                current_psi = sweep_psi_variable(
-                    theta,
-                    ser_obj,
-                    dataset,
-                    current_psi,
-                    psi_steps
-                )
+            if step["psi_sweep"]:
+                # Utilisation du pas saisi par l'utilisateur
+                current_psi_side = sweep_psi_variable(target_theta, ser_obj, dataset, current_psi_side, psi_steps)
             else:
-                # Mesure statique si pas de balayage
                 wait_for_settle()
                 with accel_lock:
                     if latest_accel_g:
-                        normg = math.sqrt(sum(x*x for x in latest_accel_g))
-                        dataset.append([
-                            latest_raw_ts or _now_iso(),
-                            theta,
-                            latest_theta,
-                            latest_psi_unwrapped,
-                            latest_raw_lsb[0],
-                            latest_raw_lsb[1],
-                            latest_raw_lsb[2],
-                            normg
-                        ])
+                        normg = math.sqrt(sum(x**2 for x in latest_accel_g))
+                        dataset.append([latest_raw_ts or _now_iso(), target_theta, latest_theta, latest_psi_unwrapped, 
+                                        latest_raw_lsb[0], latest_raw_lsb[1], latest_raw_lsb[2], normg])
                         print(f"   [Data Stat] Psi={latest_psi_unwrapped:.1f}°")
 
-        # Après toute la séquence, retour de ψ à 0°
         print("\n=== FINAL POSITIONING: Return Psi to 0° ===")
         move_psi_direct(0.0, ser_obj)
-        current_psi = 0.0
-
-        # Sauvegarder le dataset
+        
         fname = f"scan_zigzag_{int(time.time())}.csv"
         with open(fname, "w", newline="") as f:
             writer = csv.writer(f)
-            writer.writerow([
-                "time_utc",
-                "theta_cmd_deg",
-                "theta_meas_deg",
-                "psi_unwrapped_deg",
-                "x_lsb",
-                "y_lsb",
-                "z_lsb",
-                "norm_g"
-            ])
+            writer.writerow(["time_utc","theta_cmd_deg","theta_meas_deg","psi_unwrapped_deg","x_lsb","y_lsb","z_lsb","norm_g"])
             writer.writerows(dataset)
         print(f"Done. Saved to {fname}")
 
