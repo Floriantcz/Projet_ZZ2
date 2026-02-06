@@ -68,20 +68,19 @@ def parse_asc3_line(line: str) -> Optional[Tuple[int, int, int]]:
 
 import json
 
-def load_psi_steps(path: str) -> list:
-    """Charge la liste des pas de psi depuis un fichier JSON."""
+def load_calibration_sequence(path: str) -> list:
+    """Charge la liste des couples (theta, psi) depuis le JSON."""
     try:
         with open(path, "r") as f:
             cfg = json.load(f)
-        steps = cfg.get("psi_steps_deg")
-        if not steps or not all(s > 0 for s in steps):
-            raise ValueError("Liste psi_steps_deg invalide")
-        print(f"Configuration ψ chargée: {steps}")
-        return steps
+        points = cfg.get("sequence")
+        if not points:
+            raise ValueError("La clé 'sequence' est absente ou vide.")
+        print(f"Séquence chargée : {len(points)} points de mesure.")
+        return points
     except Exception as e:
-        print(f"Erreur lors du chargement du fichier {path}: {e}")
+        print(f"Erreur chargement JSON: {e}")
         raise
-
 
 def accel_reader_thread(sock: socket.socket):
     global latest_theta, latest_psi_unwrapped, latest_accel_g, latest_raw_lsb, latest_raw_ts
@@ -255,8 +254,8 @@ def sweep_psi_variable(theta_deg: float, ser_obj, dataset: list, start_pos: floa
 
 # ---------------- Main Logic ----------------
 def run_scan_sequence(host: str, port: int, ser_obj):
-    # --- Nouveau : Récupération du pas avant de commencer ---
-    psi_steps = load_psi_steps("psi_steps.json")
+    # 1. Charger la séquence complète
+    sequence = load_calibration_sequence("config.json")
 
     running_event.set()
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -270,53 +269,48 @@ def run_scan_sequence(host: str, port: int, ser_obj):
 
     theta_cmd_holder = {"theta_cmd": 0.0}
     dataset = []
-    current_psi_side = 180.0 
 
     try:
         stop_all(ser_obj)
-        sequence = [
-            {"theta": 0.0,   "psi_sweep": False},
-            {"theta": 90.0,  "psi_sweep": False},
-            {"theta": 60.0,  "psi_sweep": True},
-            {"theta": 30.0,  "psi_sweep": True},
-            {"theta": 0.0,   "psi_sweep": True},
-            {"theta": -30.0, "psi_sweep": True},
-            {"theta": -60.0, "psi_sweep": True},
-            {"theta": -90.0, "psi_sweep": False},
-            {"theta": 0.0,   "psi_sweep": False},
-        ]
+        last_theta = None
 
-        for idx, step in enumerate(sequence):
-            target_theta = step["theta"]
-            print(f"\n=== STEP {idx+1}/{len(sequence)}: Theta {target_theta}° ===")
-            
-            move_theta(target_theta, ser_obj, theta_cmd_holder)
+        for idx, point in enumerate(sequence):
+            target_theta = point["theta"]
+            target_psi = point["psi"]
 
-            if idx == 0:
-                print("Initial positioning to +180°...")
-                move_psi_direct(180.0, ser_obj)
+            print(f"[{idx+1}/{len(sequence)}] Target: Theta={target_theta}°, Psi={target_psi}°")
 
-            if step["psi_sweep"]:
-                # Utilisation du pas saisi par l'utilisateur
-                current_psi_side = sweep_psi_variable(target_theta, ser_obj, dataset, current_psi_side, psi_steps)
-            else:
-                wait_for_settle()
+            # Déplacement Theta (seulement s'il change)
+            if last_theta is None or abs(target_theta - last_theta) > 0.1:
+                move_theta(target_theta, ser_obj, theta_cmd_holder)
+                last_theta = target_theta
+
+            # Déplacement Psi (Position absolue)
+            move_psi_direct(target_psi, ser_obj)
+
+            # Attente de stabilisation et capture
+            if wait_for_settle():
                 with accel_lock:
                     if latest_accel_g:
-                        normg = math.sqrt(sum(x**2 for x in latest_accel_g))
-                        dataset.append([latest_raw_ts or _now_iso(), target_theta, latest_theta, latest_psi_unwrapped, 
-                                        latest_raw_lsb[0], latest_raw_lsb[1], latest_raw_lsb[2], normg])
-                        print(f"   [Data Stat] Psi={latest_psi_unwrapped:.1f}°")
+                        ax, ay, az = latest_accel_g
+                        normg = math.sqrt(ax**2 + ay**2 + az**2)
+                        dataset.append([
+                            latest_raw_ts or _now_iso(), 
+                            target_theta, 
+                            latest_theta, 
+                            latest_psi_unwrapped, 
+                            latest_raw_lsb[0], 
+                            latest_raw_lsb[1], 
+                            latest_raw_lsb[2], 
+                            normg
+                        ])
+                        print(f"   -> Enregistré: G={normg:.4f}")
+            else:
+                print(f"   !! Timeout stabilisation à {target_theta}/{target_psi}")
 
-        print("\n=== FINAL POSITIONING: Return Psi to 0° ===")
-        move_psi_direct(0.0, ser_obj)
-        
-        fname = f"scan_zigzag_{int(time.time())}.csv"
-        with open(fname, "w", newline="") as f:
-            writer = csv.writer(f)
-            writer.writerow(["time_utc","theta_cmd_deg","theta_meas_deg","psi_unwrapped_deg","x_lsb","y_lsb","z_lsb","norm_g"])
-            writer.writerows(dataset)
-        print(f"Done. Saved to {fname}")
+        # Sauvegarde CSV
+        fname = f"scan_full_{int(time.time())}.csv"
+        # ... (ton code de sauvegarde CSV actuel) ...
 
     finally:
         running_event.clear()
