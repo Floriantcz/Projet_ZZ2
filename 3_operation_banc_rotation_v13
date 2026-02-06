@@ -66,8 +66,6 @@ def parse_asc3_line(line: str) -> Optional[Tuple[int, int, int]]:
     try: return int(parts[2]), int(parts[3]), int(parts[4])
     except ValueError: return None
 
-import json
-
 def load_scan_config(path: str) -> list:
     try:
         with open(path, "r") as f:
