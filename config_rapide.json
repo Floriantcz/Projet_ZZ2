@@ -1,0 +1,11 @@
+{
+  "sequence": [
+    { "theta": 0.0,   "psi_steps": [] },
+    { "theta": 90.0,  "psi_steps": [] },
+    { "theta": 45.0,  "psi_steps": [10, 20, 50, 100, 100, 50, 20, 10] },
+    { "theta": 0.0,   "psi_steps": [10, 20, 50, 100, 100, 50, 20, 10] },
+    { "theta": -45.0, "psi_steps": [10, 20, 50, 100, 100, 50, 20, 10] },
+    { "theta": -90.0, "psi_steps": [] },
+    { "theta": 0.0,   "psi_steps": [] }
+  ]
+}
