@@ -249,8 +249,7 @@ def sweep_psi_variable(theta_deg: float, ser_obj, dataset: list, start_pos: floa
 
         if accel and raw:
             normg = math.sqrt(sum(a*a for a in accel))
-            dataset.append([ts or _now_iso(), theta_deg, theta_meas, psi_meas,
-                            raw[0], raw[1], raw[2], normg])
+            dataset.append([ts or _now_iso(), theta_deg, theta_meas, psi_meas, raw[0], raw[1], raw[2], normg])
             print(f"   [Data] Psi={psi_meas:.1f}° (step={step_deg}°)")
 
         # déplacer le moteur
@@ -304,29 +303,14 @@ def run_scan_sequence(host: str, port: int, ser_obj):
 
             # Balayage psi si steps définis
             if psi_steps:
-                current_psi = sweep_psi_variable(
-                    theta,
-                    ser_obj,
-                    dataset,
-                    current_psi,
-                    psi_steps
-                )
+                current_psi = sweep_psi_variable(theta, ser_obj, dataset, current_psi, psi_steps)
             else:
                 # Mesure statique si pas de balayage
                 wait_for_settle()
                 with accel_lock:
                     if latest_accel_g:
                         normg = math.sqrt(sum(x*x for x in latest_accel_g))
-                        dataset.append([
-                            latest_raw_ts or _now_iso(),
-                            theta,
-                            latest_theta,
-                            latest_psi_unwrapped,
-                            latest_raw_lsb[0],
-                            latest_raw_lsb[1],
-                            latest_raw_lsb[2],
-                            normg
-                        ])
+                        dataset.append([latest_raw_ts or _now_iso(), theta, latest_theta, latest_psi_unwrapped, latest_raw_lsb[0], latest_raw_lsb[1], latest_raw_lsb[2], normg])
                         print(f"   [Data Stat] Psi={latest_psi_unwrapped:.1f}°")
 
         # Après toute la séquence, retour de psi à 0°
@@ -338,16 +322,7 @@ def run_scan_sequence(host: str, port: int, ser_obj):
         fname = f"scan_zigzag_{int(time.time())}.csv"
         with open(fname, "w", newline="") as f:
             writer = csv.writer(f)
-            writer.writerow([
-                "time_utc",
-                "theta_cmd_deg",
-                "theta_meas_deg",
-                "psi_unwrapped_deg",
-                "x_lsb",
-                "y_lsb",
-                "z_lsb",
-                "norm_g"
-            ])
+            writer.writerow(["time_utc", "theta_cmd_deg", "theta_meas_deg", "psi_unwrapped_deg", "x_lsb", "y_lsb", "z_lsb", "norm_g"])
             writer.writerows(dataset)
         print(f"Done. Saved to {fname}")
 
