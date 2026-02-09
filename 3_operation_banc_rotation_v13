@@ -209,26 +209,26 @@ def sweep_psi_variable(theta_deg, ser_obj, dataset, start_pos, psi_steps) -> flo
 
         # Enregistrement des données
         with accel_lock:
+            psi_for_csv = normalize_angle(latest_psi_unwrapped)
             dataset.append([
                 latest_raw_ts or _now_iso(),
                 theta_deg,
                 latest_theta,
-                latest_psi_signed,
+                psi_for_csv,
                 latest_raw_lsb[0],
                 latest_raw_lsb[1],
                 latest_raw_lsb[2],
                 math.sqrt(sum(a*a for a in latest_accel_g))
             ])
-            print(f"   [Data] Psi={latest_psi_signed:.1f}°")
+            print(f"   [Data] Psi={psi_for_csv:.1f}°")
 
-        # Calcul de la prochaine position
+        # Calcul de la prochaine position du moteur
         current_target += direction * step_deg
 
         # Mouvement moteur en mode UNWRAPPED pour le zigzag
         move_psi_closed_loop(current_target, ser_obj, use_unwrapped=True)
 
     return current_target
-
 
 def run_scan_sequence(host, port, ser_obj, config_path):
     try: sequence = load_config(config_path)
