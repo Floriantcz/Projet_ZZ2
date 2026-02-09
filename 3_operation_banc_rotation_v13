@@ -277,9 +277,14 @@ def build_serial_obj(port, baud):
     return serial.Serial(port, baud, timeout=1)
 
 if __name__ == "__main__":
-    CONFIGS = {"1": "config_standard.json", "2": "config_rapide.json"}
-    print("1: Standard | 2: Rapide")
+    CONFIGS = {"1": "config_standard.json", "2": "config_rapide.json", "3": "config_lent.json"}
+    print("1: Standard | 2: Rapide | 3: Lent")
     choix = input("Choix : ").strip()
     if choix in CONFIGS:
-        ser = build_serial_obj(SERIAL_PORT, BAUDRATE)
-        run_scan_sequence(HOST, PORT, ser, CONFIGS[choix])
+        try:
+            ser = build_serial_obj(SERIAL_PORT, BAUDRATE)
+            run_scan_sequence(HOST, PORT, ser, CONFIGS[choix])
+        except Exception as e:
+            print(f"Erreur lors de l'exécution : {e}")
+    else:
+        print("Choix invalide. Fin du programme.")
