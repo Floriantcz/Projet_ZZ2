@@ -175,26 +175,49 @@ def move_psi_closed_loop(target_psi: float, ser_obj, use_unwrapped=False):
     stop_all(ser_obj)
 
 def move_theta_closed_loop(target_theta: float, ser_obj):
-    """Déplacement asservi de Theta (Motor 1)."""
     print(f"→ move_theta: targeting {target_theta:.2f}°")
     t0 = time.time()
+    
+    # On réduit la vitesse max à l'approche de 90° pour limiter l'inertie
+    local_speed_max = MOTOR_SPEED_MAX
+    if abs(target_theta) > 80:
+        local_speed_max = 20
+        
     while running_event.is_set():
-        with accel_lock: current = latest_theta
+        with accel_lock: 
+            current = latest_theta
+        
         if current is None:
-            time.sleep(CONTROL_PERIOD); continue
+            time.sleep(CONTROL_PERIOD)
+            continue
 
         error = target_theta - current
+        
+        if abs(target_theta) >= 89.0 and abs(current) >= 88.5:
+            if abs(error) < 1.0:
+                stop_all(ser_obj)
+                break
+
         if abs(error) < ANGLE_TOL:
             stop_all(ser_obj)
             break
 
         speed = KP_THETA * error
-        speed = max(min(speed, MOTOR_SPEED_MAX), -MOTOR_SPEED_MAX)
-        if abs(speed) < MOTOR_SPEED_MIN: speed = math.copysign(MOTOR_SPEED_MIN, speed)
+        
+        # Clamp speed avec la limite locale
+        speed = max(min(speed, local_speed_max), -local_speed_max)
+        
+        # Gear down : Si l'erreur est petite, on force une vitesse très lente
+        if abs(error) < 5:
+            speed = math.copysign(MOTOR_SPEED_MIN, speed)
+        elif abs(speed) < MOTOR_SPEED_MIN:
+            speed = math.copysign(MOTOR_SPEED_MIN, speed)
 
         send_command(ser_obj, f"?m1={int(speed)}")
         
-        if time.time() - t0 > 20.0: break
+        if time.time() - t0 > 20.0: 
+            print("! Timeout Theta")
+            break
         time.sleep(CONTROL_PERIOD)
     stop_all(ser_obj)
 
