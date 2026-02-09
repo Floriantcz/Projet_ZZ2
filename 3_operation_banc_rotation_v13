@@ -78,38 +78,51 @@ def accel_reader_thread(sock: socket.socket):
     global latest_theta, latest_psi_unwrapped, latest_psi_signed, latest_accel_g, latest_raw_lsb, latest_raw_ts
     buf = ""
     sock.settimeout(SOCKET_TIMEOUT)
+
     while running_event.is_set():
         try:
             data = sock.recv(4096)
-            if not data: break
+            if not data:
+                break
             buf += data.decode(errors="ignore")
             lines = buf.split("\n")
-            buf = lines[-1]
+            buf = lines[-1]  # garder le dernier fragment
             for line in lines[:-1]:
                 parsed = parse_asc3_line(line)
-                if not parsed: continue
+                if not parsed:
+                    continue
                 ax_lsb, ay_lsb, az_lsb = parsed
                 ax_g, ay_g, az_g = lsb_to_g(ax_lsb, ay_lsb, az_lsb)
-                
+
+                # Calcul des angles
                 theta = compute_theta_signed(ax_g, ay_g, az_g)
                 psi_s = math.degrees(math.atan2(ay_g, az_g))
                 psi_s = normalize_angle(psi_s)
 
                 with accel_lock:
+                    # Unwrapping fiable
                     prev = latest_psi_unwrapped
                     if prev is None:
                         psi_unwrapped = psi_s
                     else:
-                        k = round((prev - psi_s) / 360.0)
-                        psi_unwrapped = psi_s + 360.0 * k
-                    
+                        delta = psi_s - latest_psi_signed
+                        # Ramener delta dans [-180,180] pour éviter les sauts
+                        if delta > 180:
+                            delta -= 360
+                        elif delta < -180:
+                            delta += 360
+                        psi_unwrapped = prev + delta
+
+                    # Mise à jour des variables partagées
                     latest_theta = theta
                     latest_psi_signed = psi_s
                     latest_psi_unwrapped = psi_unwrapped
                     latest_accel_g = (ax_g, ay_g, az_g)
                     latest_raw_lsb = (ax_lsb, ay_lsb, az_lsb)
                     latest_raw_ts = _now_iso()
-        except: continue
+
+        except Exception:
+            continue
 
 def wait_for_settle(timeout=SETTLE_TIMEOUT):
     t_start = time.time()
