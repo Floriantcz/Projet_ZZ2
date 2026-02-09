@@ -17,10 +17,13 @@ KP = 2.5
 MAX_SPEED = 30
 MIN_SPEED = 15
 
-STOP_THRESHOLD = 0.9   # deg
+STOP_THRESHOLD = 0.9
 CONTROL_PERIOD = 0.05
 SETTLE_TIME = 1.0
 TIMEOUT = 30
+
+ANGLE_LIMIT = 179.0
+THETA_SAFE = 83.0       #LIMITE STABLE POUR THETA
 
 # ------------------- SHARED STATE ----------------
 accel_lock = threading.Lock()
@@ -36,12 +39,11 @@ def send_command(cmd):
 def stop_all():
     send_command("?stopall")
 
+# ------------------- ACCEL -------------------
 def get_accel_lsb():
-    """Lecture du capteur (ASC3 <timestamp> <x> <y> <z>)"""
     try:
         raw = sock.recv(1024).decode()
-        lines = raw.split('\n')
-        for line in lines:
+        for line in raw.split('\n'):
             if line.startswith('ASC3'):
                 parts = line.strip().split('\t')
                 if len(parts) >= 5:
@@ -53,19 +55,23 @@ def get_accel_lsb():
 def lsb_to_g(ax, ay, az):
     return ax / SENSITIVITY, ay / SENSITIVITY, az / SENSITIVITY
 
-def compute_angles(ax, ay, az):
-    """Theta [-90,90], Psi [-180,180]"""
+# ------------------- ANGLES -------------------
+def normalize_angle(angle):
+    return (angle + 180) % 360 - 180
 
+def angle_error(target, current):
+    return normalize_angle(target - current)
+
+def compute_angles(ax, ay, az):
     eps = 1e-12
+
     theta = math.degrees(math.atan2(ax, math.sqrt(ay*ay + az*az + eps)))
-    psi = math.degrees(math.atan2(ay, az))  # [-180,180]
+    psi   = math.degrees(math.atan2(ay, az))
+
+    theta = max(min(theta, 90), -90)
+    psi   = normalize_angle(psi)
 
     return theta, psi
-
-def normalize_angle(angle):
-    """Normalise angle dans [-180,180]"""
-    angle = (angle + 180) % 360 - 180
-    return angle
 
 # ------------------- ACCEL THREAD ----------------
 def accel_reader():
@@ -78,55 +84,48 @@ def accel_reader():
             ax, ay, az = lsb_to_g(ax_lsb, ay_lsb, az_lsb)
 
             theta, psi = compute_angles(ax, ay, az)
-            psi = normalize_angle(psi)
+
             with accel_lock:
                 latest_theta = theta
                 latest_psi = psi
 
+# ------------------- CONTROL --------------------
+def move_motor_to_angle(target, get_angle, motor_id, name, min_angle, max_angle):
 
-# ------------------- CONTROL FUNCTION REVISEE --------------------
+    target = max(min(target, max_angle), min_angle)
+    target = normalize_angle(target)
 
-def move_motor_to_angle(target_angle, get_angle, motor_id, name, min_angle=None, max_angle=None):
-
-    if min_angle is not None and max_angle is not None:
-        target_angle = max(min(target_angle, max_angle), min_angle)
-
-    print(f"\n--- Moving {name} to {target_angle:.2f}° ---")
-    start_time = time.time()
+    print(f"\n--- Moving {name} to {target:.1f}° ---")
+    start = time.time()
 
     while True:
         with accel_lock:
-            current_angle = get_angle()
+            current = get_angle()
 
-        if current_angle is None:
+        if current is None:
             continue
 
-        # Limiter la valeur mesurée si nécessaire
-        if min_angle is not None and max_angle is not None:
-            current_angle = max(min(current_angle, max_angle), min_angle)
+        current = normalize_angle(current)
+        error = angle_error(target, current)
 
-        error = target_angle - current_angle
-        print(f"{name} = {current_angle:+.2f}° | error = {error:+.2f}°")
+        print(f"{name} = {current:+.2f}° | error = {error:+.2f}°")
 
-        # Vérifier si on est à l'angle souhaité
         if abs(error) < STOP_THRESHOLD:
             stop_all()
-            print(f"{name} target reached and stabilized.")
+            print(f"{name} reached.")
             break
 
         speed = KP * error
         speed = max(min(speed, MAX_SPEED), -MAX_SPEED)
 
-        # Éviter que le moteur stagne
-        if abs(speed) < MIN_SPEED:
+        if abs(error) > STOP_THRESHOLD and abs(speed) < MIN_SPEED:
             speed = math.copysign(MIN_SPEED, speed)
 
         send_command(f"?m{motor_id}={int(speed)}")
 
-        # Timeout sécurité
-        if time.time() - start_time > TIMEOUT:
+        if time.time() - start > TIMEOUT:
             stop_all()
-            raise RuntimeError(f"Timeout reaching {name}")
+            raise RuntimeError(f"{name} timeout")
 
         time.sleep(CONTROL_PERIOD)
 
@@ -142,7 +141,6 @@ try:
     print("Accelerometer connected.")
 
     print("Connecting motor controller...")
-
     ser = serial.Serial(SERIAL_PORT, BAUDRATE, timeout=1)
     time.sleep(2)
     print("Motor controller connected.")
@@ -158,16 +156,18 @@ try:
     target_psi = float(input("Enter target Psi [-180,180]: "))
     target_theta = float(input("Enter target Theta [-90,90]: "))
 
+    # 🔹 Limite stable Theta
+    target_theta = max(min(target_theta, THETA_SAFE), -THETA_SAFE)
+
     # Mouvement Psi → Motor 2
-    move_motor_to_angle(target_psi, lambda : latest_psi,2 ,"Psi", min_angle=-180, max_angle=180)
+    move_motor_to_angle(target_psi, lambda : latest_psi, 2, "Psi", min_angle=-180, max_angle=180)
     # Mouvement Theta → Motor 1
-    move_motor_to_angle(target_theta, lambda : latest_theta,1 ,"Theta", min_angle=-90, max_angle=90)
+    move_motor_to_angle(target_theta, lambda : latest_theta, 1, "Theta", min_angle=-THETA_SAFE, max_angle=THETA_SAFE)
 
     stop_all()
     print("\nObjectif atteint!")
 
 finally:
-    
     running = False
     stop_all()
     ser.close()
