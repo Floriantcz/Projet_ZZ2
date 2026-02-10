@@ -3,6 +3,7 @@
 Accelerometer calibration bench pilot
 Version STABLE – Scan automatique avec positions absolues
 Intégration logique camarade + affichage terminal détaillé
+Choix du mode : standard / rapide / lent
 """
 
 import json
@@ -239,6 +240,28 @@ def run_sequence(config_path, ser):
 if __name__ == "__main__":
     import serial
 
+    print("\nChoisir le mode de scan :")
+    print("  1 → Standard")
+    print("  2 → Rapide")
+    print("  3 → Lent")
+
+    choice = input("Votre choix [1/2/3] : ").strip()
+
+    CONFIG_MAP = {
+        "1": ("STANDARD", "config_standard.json"),
+        "2": ("RAPIDE",   "config_rapide.json"),
+        "3": ("LENT",     "config_lent.json")
+    }
+
+    if choice not in CONFIG_MAP:
+        print("Choix invalide, mode STANDARD utilisé.")
+        mode_name, config_file = CONFIG_MAP["1"]
+    else:
+        mode_name, config_file = CONFIG_MAP[choice]
+
+    print(f"\nMode sélectionné : {mode_name}")
+    print(f"Configuration : {config_file}\n")
+
     print("Connexion à l'accéléromètre…")
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.connect((HOST, PORT))
@@ -252,7 +275,7 @@ if __name__ == "__main__":
     threading.Thread(target=accel_reader, args=(sock,), daemon=True).start()
 
     try:
-        run_sequence("config_standard.json", ser)
+        run_sequence(config_file, ser)
     finally:
         running = False
         stop_all(ser)

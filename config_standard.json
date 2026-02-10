@@ -2,15 +2,11 @@
   "sequence": [
     { "theta": 0,   "psi_positions": [] },
     { "theta": 90,  "psi_positions": [] },
-
     { "theta": 60,  "psi_positions": [180, 135, 90, 45, 0, -45, -90, -135, -180] },
     { "theta": 30,  "psi_positions": [-180, -135, -90, -45, 0, 45, 90, 135, 180] },
-
     { "theta": 0,   "psi_positions": [180, 135, 90, 45, 0, -45, -90, -135, -180] },
     { "theta": -30, "psi_positions": [-180, -135, -90, -45, 0, 45, 90, 135, 180] },
-
     { "theta": -60, "psi_positions": [180, 135, 90, 45, 0, -45, -90, -135, -180] },
-
     { "theta": -90, "psi_positions": [] },
     { "theta": 0,   "psi_positions": [] }
   ]
