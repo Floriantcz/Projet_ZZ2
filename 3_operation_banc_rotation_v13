@@ -239,9 +239,21 @@ def run_scan_sequence(host, port, ser_obj, config_path):
             
             move_theta_closed_loop(target_theta, ser_obj)
             
+            wait_for_settle(timeout=3.0)  # Attendre stabilisation
+            with accel_lock:
+                if latest_psi_unwrapped is not None:
+                    current_psi_unwrapped = latest_psi_unwrapped
+                    print(f"   → Resync psi_unwrapped = {current_psi_unwrapped:.1f}°")
+            
             if idx == 0: 
                 # Premier positionnement à 180° physique
                 move_psi_closed_loop(180.0, ser_obj, use_unwrapped=False)
+                # Resync après ce mouvement aussi
+                wait_for_settle(timeout=3.0)
+                with accel_lock:
+                    if latest_psi_unwrapped is not None:
+                        current_psi_unwrapped = latest_psi_unwrapped
+                        print(f"   → Resync après init psi_unwrapped = {current_psi_unwrapped:.1f}°")
 
             if psi_steps:
                 current_psi_unwrapped = sweep_psi_variable(target_theta, ser_obj, dataset, current_psi_unwrapped, psi_steps)
@@ -255,11 +267,10 @@ def run_scan_sequence(host, port, ser_obj, config_path):
                         print(f"   [Data Stat] Psi={latest_psi_unwrapped:.1f}°")
 
         print("\n=== FIN : Retour Physique à 0° (Asservi) ===")
-        # On utilise use_unwrapped=False pour revenir au 0 le plus proche
         move_psi_closed_loop(0.0, ser_obj, use_unwrapped=False)
         move_theta_closed_loop(0.0, ser_obj)
         
-        # Sauvegarde CSV... (identique à votre code)
+        # Sauvegarde CSV...
         fname = f"scan_{os.path.splitext(config_path)[0]}_{int(time.time())}.csv"
         with open(fname, "w", newline="") as f:
             writer = csv.writer(f)
