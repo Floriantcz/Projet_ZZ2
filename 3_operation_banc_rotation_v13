@@ -203,17 +203,23 @@ def sweep_psi_variable(theta_deg, ser_obj, dataset, start_pos, psi_steps) -> flo
     current_target = start_pos
     direction = -1 if start_pos > 0 else 1
     
-    for step_deg in psi_steps:
+    for i, step_deg in enumerate(psi_steps):
         wait_for_settle()
         with accel_lock:
             dataset.append([latest_raw_ts or _now_iso(), theta_deg, latest_theta, latest_psi_unwrapped, 
                             latest_raw_lsb[0], latest_raw_lsb[1], latest_raw_lsb[2], 
                             math.sqrt(sum(a*a for a in latest_accel_g))])
-            print(f"   [Data] Psi={latest_psi_unwrapped:.1f}°")
+            print(f"   [Data] Psi={latest_psi_unwrapped:.1f}°, Step {i+1}/{len(psi_steps)}, delta={direction*step_deg:+.0f}°")
 
         current_target += direction * step_deg
-        # On utilise le mode UNWRAPPED pour le zigzag pour ne pas "sauter" de tours
         move_psi_closed_loop(current_target, ser_obj, use_unwrapped=True)
+        
+        if abs(current_target % 360.0) < 10.0 and direction == -1:
+            direction = 1
+            print(f"   → Inversion direction à {current_target:.1f}° (montée)")
+        elif abs((current_target % 360.0) - 180.0) < 10.0 and direction == 1 and i > len(psi_steps) // 2:
+            direction = -1
+            print(f"   → Inversion direction à {current_target:.1f}° (descente)")
     
     return current_target
 
