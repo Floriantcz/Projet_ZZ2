@@ -130,8 +130,15 @@ def move_motor(target, get_angle, motor_id, name, amin, amax, ser):
             time.sleep(CONTROL_PERIOD)
             continue
 
+        if motor_id == 1:
+            current = clamp(current, -THETA_SAFE, THETA_SAFE)
+
         current = normalize_angle(current)
         error = shortest_angle_error(target, current)
+
+        if motor_id == 1:
+            if (current >= THETA_SAFE and error > 0) or (current <= -THETA_SAFE and error < 0):
+                error = 0
 
         print(f"   {name} = {current:+6.2f}° | erreur = {error:+6.2f}°")
 
