@@ -1,302 +1,218 @@
 #!/usr/bin/env python3
 """
-Accelerometer calibration bench pilot - Dynamic Config & Closed Loop Version
-Correction : Retour à 0° asservi en boucle fermée pour éviter les rotations infinies.
+Accelerometer calibration bench pilot
+Version STABLE : intégration logique camarade + scan automatique
 """
 
-import json
-import csv
-import math
-import socket
-import threading
-import time
-import os
+import json, csv, math, socket, threading, time, os
 from datetime import datetime
-from typing import List, Optional, Tuple
+from typing import Optional, Tuple
 
-# ---------------- Config ----------------
+# ---------------- CONFIG ----------------
 HOST = "192.168.4.1"
 PORT = 3535
 SERIAL_PORT = "COM7"
 BAUDRATE = 115200
 
-SENSITIVITY = 256000.0  # LSB/g
-MOTOR_SPEED_MAX = 30
-MOTOR_SPEED_MIN = 15
-KP_PSI = 2.5            # Tiré de votre code de référence
-KP_THETA = 2.0
-ANGLE_TOL = 0.9         # STOP_THRESHOLD
-CONTROL_PERIOD = 0.05
-SETTLE_TIMEOUT = 8.0
-STABLE_DURATION = 1.5
-STABLE_TOL = 0.008
-SOCKET_TIMEOUT = 1.0
+SENSITIVITY = 256000.0
 
-# ---------------- Shared state ----------------
+KP = 2.5
+MAX_SPEED = 30
+MIN_SPEED = 15
+
+STOP_THRESHOLD = 0.9
+CONTROL_PERIOD = 0.05
+SETTLE_TIME = 1.0
+TIMEOUT = 30
+
+THETA_SAFE = 89.0
+PSI_SAFE = 178.0   # JAMAIS ±180°
+
+# ---------------- SHARED STATE ----------------
 accel_lock = threading.Lock()
 latest_theta: Optional[float] = None
-latest_psi_unwrapped: Optional[float] = None # Pour le zigzag
-latest_psi_signed: Optional[float] = None    # Pour le retour à 0 direct
-latest_accel_g: Optional[Tuple[float, float, float]] = None
-latest_raw_lsb: Optional[Tuple[int, int, int]] = None
-latest_raw_ts: Optional[str] = None
-running_event = threading.Event()
+latest_psi: Optional[float] = None
+latest_raw: Optional[Tuple[int,int,int]] = None
+latest_ts: Optional[str] = None
+running = True
 
-# ---------------- Utilities ----------------
-def _now_iso() -> str:
-    return datetime.utcnow().isoformat(timespec="microseconds") + "Z"
+# ---------------- UTILS ----------------
+def now():
+    return datetime.utcnow().isoformat(timespec="milliseconds") + "Z"
 
-def lsb_to_g(ax_lsb: int, ay_lsb: int, az_lsb: int) -> Tuple[float, float, float]:
-    return ax_lsb / SENSITIVITY, ay_lsb / SENSITIVITY, az_lsb / SENSITIVITY
+def normalize_angle(a):
+    return (a + 180) % 360 - 180
 
-def compute_theta_signed(ax_g: float, ay_g: float, az_g: float) -> float:
+def shortest_angle_error(target, current):
+    return (target - current + 180) % 360 - 180
+
+def clamp(v, vmin, vmax):
+    return max(min(v, vmax), vmin)
+
+# ---------------- ACCEL ----------------
+def lsb_to_g(ax, ay, az):
+    return ax / SENSITIVITY, ay / SENSITIVITY, az / SENSITIVITY
+
+def compute_angles(ax, ay, az):
     eps = 1e-12
-    return math.degrees(math.atan2(ax_g, math.sqrt(ay_g*ay_g + az_g*az_g + eps)))
+    theta = math.degrees(math.atan2(ax, math.sqrt(ay*ay + az*az + eps)))
+    psi   = math.degrees(math.atan2(ay, az))
+    theta = clamp(theta, -90, 90)
+    psi   = normalize_angle(psi)
+    return theta, psi
 
-def normalize_angle(angle: float) -> float:
-    """Ramène l'angle dans [-180, 180]"""
-    return (angle + 180.0) % 360.0 - 180.0
-
-def parse_asc3_line(line: str) -> Optional[Tuple[int, int, int]]:
-    parts = line.strip().split()
-    if len(parts) < 5 or parts[0] != "ASC3": return None
-    try: return int(parts[2]), int(parts[3]), int(parts[4])
-    except ValueError: return None
-
-def load_config(path: str) -> list:
-    if not os.path.exists(path):
-        raise FileNotFoundError(f"Fichier config introuvable : {path}")
-    with open(path, "r") as f:
-        cfg = json.load(f)
-    sequence = cfg.get("sequence", [])
-    if not sequence:
-        raise ValueError("La clé 'sequence' est absente ou vide.")
-    return sequence
-
-# ---------------- Threads ----------------
-def accel_reader_thread(sock: socket.socket):
-    global latest_theta, latest_psi_unwrapped, latest_psi_signed, latest_accel_g, latest_raw_lsb, latest_raw_ts
-    buf = ""
-    sock.settimeout(SOCKET_TIMEOUT)
-    while running_event.is_set():
+def parse_asc3(line):
+    p = line.strip().split()
+    if len(p) >= 5 and p[0] == "ASC3":
         try:
-            data = sock.recv(4096)
-            if not data: break
-            buf += data.decode(errors="ignore")
+            return int(p[2]), int(p[3]), int(p[4])
+        except:
+            pass
+    return None
+
+def accel_reader(sock):
+    global latest_theta, latest_psi, latest_raw, latest_ts
+    buf = ""
+    sock.settimeout(1)
+    while running:
+        try:
+            data = sock.recv(4096).decode(errors="ignore")
+            buf += data
             lines = buf.split("\n")
             buf = lines[-1]
-            for line in lines[:-1]:
-                parsed = parse_asc3_line(line)
-                if not parsed: continue
-                ax_lsb, ay_lsb, az_lsb = parsed
-                ax_g, ay_g, az_g = lsb_to_g(ax_lsb, ay_lsb, az_lsb)
-                
-                theta = compute_theta_signed(ax_g, ay_g, az_g)
-                psi_s = math.degrees(math.atan2(ay_g, az_g))
-                psi_s = normalize_angle(psi_s)
-
+            for l in lines[:-1]:
+                r = parse_asc3(l)
+                if not r: continue
+                ax, ay, az = lsb_to_g(*r)
+                theta, psi = compute_angles(ax, ay, az)
                 with accel_lock:
-                    prev = latest_psi_unwrapped
-                    if prev is None:
-                        psi_unwrapped = psi_s
-                    else:
-                        k = round((prev - psi_s) / 360.0)
-                        psi_unwrapped = psi_s + 360.0 * k
-                    
                     latest_theta = theta
-                    latest_psi_signed = psi_s
-                    latest_psi_unwrapped = psi_unwrapped
-                    latest_accel_g = (ax_g, ay_g, az_g)
-                    latest_raw_lsb = (ax_lsb, ay_lsb, az_lsb)
-                    latest_raw_ts = _now_iso()
-        except: continue
+                    latest_psi = psi
+                    latest_raw = r
+                    latest_ts = now()
+        except:
+            pass
 
-def wait_for_settle(timeout=SETTLE_TIMEOUT):
-    t_start = time.time()
-    stable_start = None
-    last_norm = None
-    while running_event.is_set():
-        with accel_lock: accel = latest_accel_g
-        if accel is None:
-            if time.time() - t_start > timeout: return False
-            time.sleep(CONTROL_PERIOD); continue
-        norm = math.sqrt(sum(x**2 for x in accel))
-        if last_norm is None or abs(norm - last_norm) <= STABLE_TOL:
-            if stable_start is None: stable_start = time.time()
-            elif time.time() - stable_start >= STABLE_DURATION: return True
-        else: stable_start = None
-        last_norm = norm
-        if time.time() - t_start > timeout: return False
-        time.sleep(CONTROL_PERIOD)
-    return False
+# ---------------- MOTOR ----------------
+def send(ser, cmd):
+    ser.write((cmd + "\n").encode())
 
-# ---------------- Motor Control ----------------
-def send_command(ser_obj, cmd: str):
-    try:
-        ser_obj.write((cmd + "\n").encode())
-    except: pass
+def stop_all(ser):
+    send(ser, "?stopall")
 
-def stop_all(ser_obj):
-    send_command(ser_obj, "?stopall")
+def move_motor(target, get_angle, motor_id, name, amin, amax, ser):
+    target = clamp(target, amin, amax)
+    start = time.time()
 
-def move_psi_closed_loop(target_psi: float, ser_obj, use_unwrapped=False):
-    """
-    Déplacement asservi de Psi (Motor 2). 
-    Si use_unwrapped=True (pendant le zigzag), on utilise la valeur continue.
-    Si False (retour à 0), on utilise la valeur normalisée [-180, 180].
-    """
-    print(f"→ move_psi: targeting {target_psi:.2f}°")
-    t0 = time.time()
-    while running_event.is_set():
+    while running:
         with accel_lock:
-            current = latest_psi_unwrapped if use_unwrapped else latest_psi_signed
-        
+            current = get_angle()
+
         if current is None:
-            time.sleep(CONTROL_PERIOD); continue
+            time.sleep(CONTROL_PERIOD)
+            continue
 
-        error = target_psi - current
-        if not use_unwrapped: error = normalize_angle(error) # Sécurité retour au plus court
+        current = normalize_angle(current)
+        error = shortest_angle_error(target, current)
 
-        if abs(error) < ANGLE_TOL:
-            stop_all(ser_obj)
+        if abs(error) < STOP_THRESHOLD:
+            stop_all(ser)
             break
 
-        speed = KP_PSI * error
-        # Clamp speed
-        speed = max(min(speed, MOTOR_SPEED_MAX), -MOTOR_SPEED_MAX)
-        if abs(speed) < MOTOR_SPEED_MIN: speed = math.copysign(MOTOR_SPEED_MIN, speed)
+        speed = KP * error
+        speed = clamp(speed, -MAX_SPEED, MAX_SPEED)
 
-        send_command(ser_obj, f"?m2={int(speed)}")
-        
-        if time.time() - t0 > 30.0: # Timeout
-            stop_all(ser_obj)
-            break
+        if abs(speed) < MIN_SPEED:
+            speed = math.copysign(MIN_SPEED, speed)
+
+        send(ser, f"?m{motor_id}={int(speed)}")
+
+        if time.time() - start > TIMEOUT:
+            stop_all(ser)
+            raise RuntimeError(f"{name} timeout")
+
         time.sleep(CONTROL_PERIOD)
-    stop_all(ser_obj)
 
-def move_theta_closed_loop(target_theta: float, ser_obj):
-    """Déplacement asservi de Theta (Motor 1)."""
-    print(f"→ move_theta: targeting {target_theta:.2f}°")
-    t0 = time.time()
-    while running_event.is_set():
-        with accel_lock: current = latest_theta
-        if current is None:
-            time.sleep(CONTROL_PERIOD); continue
+    time.sleep(SETTLE_TIME)
 
-        error = target_theta - current
-        if abs(error) < ANGLE_TOL:
-            stop_all(ser_obj)
-            break
+# ---------------- SCAN LOGIC ----------------
+def sweep_psi(theta_cmd, psi_steps, ser, dataset):
+    psi_target = 0.0
 
-        speed = KP_THETA * error
-        speed = max(min(speed, MOTOR_SPEED_MAX), -MOTOR_SPEED_MAX)
-        if abs(speed) < MOTOR_SPEED_MIN: speed = math.copysign(MOTOR_SPEED_MIN, speed)
+    for step in psi_steps:
+        psi_target += step
+        psi_target = clamp(psi_target, -PSI_SAFE, PSI_SAFE)
 
-        send_command(ser_obj, f"?m1={int(speed)}")
-        
-        if time.time() - t0 > 20.0: break
-        time.sleep(CONTROL_PERIOD)
-    stop_all(ser_obj)
+        move_motor(
+            psi_target,
+            lambda: latest_psi,
+            2,
+            "Psi",
+            -PSI_SAFE,
+            PSI_SAFE,
+            ser
+        )
 
-# ---------------- Logic ----------------
-def sweep_psi_variable(theta_deg, ser_obj, dataset, start_pos, psi_steps) -> float:
-    current_target = start_pos
-    direction = -1 if start_pos > 0 else 1
-    
-    for i, step_deg in enumerate(psi_steps):
-        wait_for_settle()
         with accel_lock:
-            dataset.append([latest_raw_ts or _now_iso(), theta_deg, latest_theta, latest_psi_unwrapped, 
-                            latest_raw_lsb[0], latest_raw_lsb[1], latest_raw_lsb[2], 
-                            math.sqrt(sum(a*a for a in latest_accel_g))])
-            print(f"   [Data] Psi={latest_psi_unwrapped:.1f}°, Step {i+1}/{len(psi_steps)}, delta={direction*step_deg:+.0f}°")
+            if latest_raw:
+                ax, ay, az = latest_raw
+                norm = math.sqrt(sum((v/SENSITIVITY)**2 for v in latest_raw))
+                dataset.append([
+                    latest_ts, theta_cmd,
+                    latest_theta, latest_psi,
+                    ax, ay, az, norm
+                ])
 
-        current_target += direction * step_deg
-        move_psi_closed_loop(current_target, ser_obj, use_unwrapped=True)
-        
-        if abs(current_target % 360.0) < 10.0 and direction == -1:
-            direction = 1
-            print(f"   → Inversion direction à {current_target:.1f}° (montée)")
-        elif abs((current_target % 360.0) - 180.0) < 10.0 and direction == 1 and i > len(psi_steps) // 2:
-            direction = -1
-            print(f"   → Inversion direction à {current_target:.1f}° (descente)")
-    
-    return current_target
+def run_sequence(config_path, ser):
+    with open(config_path) as f:
+        seq = json.load(f)["sequence"]
 
-def run_scan_sequence(host, port, ser_obj, config_path):
-    try: sequence = load_config(config_path)
-    except Exception as e: print(e); return
-
-    running_event.set()
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    try: sock.connect((host, port))
-    except: return
-
-    threading.Thread(target=accel_reader_thread, args=(sock,), daemon=True).start()
     dataset = []
-    current_psi_unwrapped = 180.0 
+
+    for step in seq:
+        theta = clamp(step["theta"], -THETA_SAFE, THETA_SAFE)
+
+        move_motor(
+            theta,
+            lambda: latest_theta,
+            1,
+            "Theta",
+            -THETA_SAFE,
+            THETA_SAFE,
+            ser
+        )
+
+        if step["psi_steps"]:
+            sweep_psi(theta, step["psi_steps"], ser, dataset)
+        else:
+            time.sleep(SETTLE_TIME)
+
+    # retour zéro
+    move_motor(0, lambda: latest_psi, 2, "Psi", -PSI_SAFE, PSI_SAFE, ser)
+    move_motor(0, lambda: latest_theta, 1, "Theta", -THETA_SAFE, THETA_SAFE, ser)
+
+    # save CSV
+    with open("scan_result.csv", "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["time","theta_cmd","theta","psi","x","y","z","norm"])
+        w.writerows(dataset)
+
+# ---------------- MAIN ----------------
+if __name__ == "__main__":
+    import serial
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.connect((HOST, PORT))
+
+    ser = serial.Serial(SERIAL_PORT, BAUDRATE, timeout=1)
+    time.sleep(2)
+
+    threading.Thread(target=accel_reader, args=(sock,), daemon=True).start()
 
     try:
-        stop_all(ser_obj)
-        for idx, step in enumerate(sequence):
-            target_theta = float(step.get("theta", 0.0))
-            psi_steps = step.get("psi_steps", [])
-            print(f"\n=== STEP {idx+1}/{len(sequence)}: Theta {target_theta}° ===")
-            
-            move_theta_closed_loop(target_theta, ser_obj)
-            
-            wait_for_settle(timeout=3.0)  # Attendre stabilisation
-            with accel_lock:
-                if latest_psi_unwrapped is not None:
-                    current_psi_unwrapped = latest_psi_unwrapped
-                    print(f"   → Resync psi_unwrapped = {current_psi_unwrapped:.1f}°")
-            
-            if idx == 0: 
-                # Premier positionnement à 180° physique
-                move_psi_closed_loop(180.0, ser_obj, use_unwrapped=False)
-                # Resync après ce mouvement aussi
-                wait_for_settle(timeout=3.0)
-                with accel_lock:
-                    if latest_psi_unwrapped is not None:
-                        current_psi_unwrapped = latest_psi_unwrapped
-                        print(f"   → Resync après init psi_unwrapped = {current_psi_unwrapped:.1f}°")
-
-            if psi_steps:
-                current_psi_unwrapped = sweep_psi_variable(target_theta, ser_obj, dataset, current_psi_unwrapped, psi_steps)
-            else:
-                wait_for_settle()
-                with accel_lock:
-                    if latest_accel_g:
-                        normg = math.sqrt(sum(x**2 for x in latest_accel_g))
-                        dataset.append([latest_raw_ts or _now_iso(), target_theta, latest_theta, latest_psi_unwrapped, 
-                                        latest_raw_lsb[0], latest_raw_lsb[1], latest_raw_lsb[2], normg])
-                        print(f"   [Data Stat] Psi={latest_psi_unwrapped:.1f}°")
-
-        print("\n=== FIN : Retour Physique à 0° (Asservi) ===")
-        move_psi_closed_loop(0.0, ser_obj, use_unwrapped=False)
-        move_theta_closed_loop(0.0, ser_obj)
-        
-        # Sauvegarde CSV...
-        fname = f"scan_{os.path.splitext(config_path)[0]}_{int(time.time())}.csv"
-        with open(fname, "w", newline="") as f:
-            writer = csv.writer(f)
-            writer.writerow(["time_utc","theta_cmd_deg","theta_meas_deg","psi_unwrapped_deg","x_lsb","y_lsb","z_lsb","norm_g"])
-            writer.writerows(dataset)
-
+        run_sequence("config_standard.json", ser)
     finally:
-        running_event.clear()
-        stop_all(ser_obj)
+        running = False
+        stop_all(ser)
+        ser.close()
         sock.close()
-
-# ---------------- Main ----------------
-def build_serial_obj(port, baud):
-    import serial
-    return serial.Serial(port, baud, timeout=1)
-
-if __name__ == "__main__":
-    CONFIGS = {"1": "config_standard.json", "2": "config_rapide.json"}
-    print("1: Standard | 2: Rapide")
-    choix = input("Choix : ").strip()
-    if choix in CONFIGS:
-        ser = build_serial_obj(SERIAL_PORT, BAUDRATE)
-        run_scan_sequence(HOST, PORT, ser, CONFIGS[choix])
