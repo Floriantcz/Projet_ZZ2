@@ -4,6 +4,7 @@ Accelerometer calibration bench pilot
 Version STABLE – Scan automatique avec positions absolues
 Intégration logique camarade + affichage terminal détaillé
 Choix du mode : standard / rapide / lent
+Sécurité : Theta ±90° limité à ±88° pour éviter rotations complètes
 """
 
 import json
@@ -116,10 +117,6 @@ def move_motor(target, get_angle, motor_id, name, amin, amax, ser):
     target = clamp(target, amin, amax)
     start = time.time()
 
-    threshold = STOP_THRESHOLD
-    if motor_id == 1 and abs(target) >= THETA_SAFE:
-        threshold *= 2
-
     print(f"→ {name} cible : {target:+.1f}°")
 
     while running:
@@ -130,19 +127,12 @@ def move_motor(target, get_angle, motor_id, name, amin, amax, ser):
             time.sleep(CONTROL_PERIOD)
             continue
 
-        if motor_id == 1:
-            current = clamp(current, -THETA_SAFE, THETA_SAFE)
-
         current = normalize_angle(current)
         error = shortest_angle_error(target, current)
 
-        if motor_id == 1:
-            if (current >= THETA_SAFE and error > 0) or (current <= -THETA_SAFE and error < 0):
-                error = 0
-
         print(f"   {name} = {current:+6.2f}° | erreur = {error:+6.2f}°")
 
-        if abs(error) < threshold:
+        if abs(error) < STOP_THRESHOLD:
             stop_all(ser)
             print(f"✓ {name} atteint")
             break
@@ -214,7 +204,14 @@ def run_sequence(config_path, ser):
     move_motor(180, lambda: latest_psi, 2, "Psi", -PSI_SAFE, PSI_SAFE, ser)
 
     for step_idx, step in enumerate(sequence, 1):
-        theta_cmd = clamp(step["theta"], -THETA_SAFE, THETA_SAFE)
+        theta_cmd = step["theta"]
+
+        # Sécurité : jamais atteindre ±90°
+        if theta_cmd >= 90:
+            theta_cmd = 88
+        elif theta_cmd <= -90:
+            theta_cmd = -88
+
         psi_positions = step.get("psi_positions", [])
 
         print(f"\n=== ÉTAPE {step_idx}/{len(sequence)} ===")
