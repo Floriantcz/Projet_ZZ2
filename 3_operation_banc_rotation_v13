@@ -116,6 +116,10 @@ def move_motor(target, get_angle, motor_id, name, amin, amax, ser):
     target = clamp(target, amin, amax)
     start = time.time()
 
+    threshold = STOP_THRESHOLD
+    if motor_id == 1 and abs(target) >= THETA_SAFE:
+        threshold *= 2
+
     print(f"→ {name} cible : {target:+.1f}°")
 
     while running:
@@ -131,7 +135,7 @@ def move_motor(target, get_angle, motor_id, name, amin, amax, ser):
 
         print(f"   {name} = {current:+6.2f}° | erreur = {error:+6.2f}°")
 
-        if abs(error) < STOP_THRESHOLD:
+        if abs(error) < threshold:
             stop_all(ser)
             print(f"✓ {name} atteint")
             break
