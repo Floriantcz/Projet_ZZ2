@@ -22,8 +22,8 @@ CONTROL_PERIOD = 0.05
 SETTLE_TIME = 1.0
 TIMEOUT = 30
 
-ANGLE_LIMIT = 179.0
-THETA_SAFE = 83.0       #LIMITE STABLE POUR THETA
+THETA_SAFE = 84.0
+PSI_SAFE = 178.0   # JAMAIS ±180°
 
 # ------------------- SHARED STATE ----------------
 accel_lock = threading.Lock()
@@ -59,32 +59,33 @@ def lsb_to_g(ax, ay, az):
 def normalize_angle(angle):
     return (angle + 180) % 360 - 180
 
-def angle_error(target, current):
-    return normalize_angle(target - current)
+def shortest_angle_error(target, current):
+    return (target - current + 180) % 360 - 180
+
+def clamp_psi(angle):
+    if angle >= 180:
+        return PSI_SAFE
+    if angle <= -180:
+        return -PSI_SAFE
+    return max(min(angle, PSI_SAFE), -PSI_SAFE)
 
 def compute_angles(ax, ay, az):
     eps = 1e-12
-
     theta = math.degrees(math.atan2(ax, math.sqrt(ay*ay + az*az + eps)))
     psi   = math.degrees(math.atan2(ay, az))
-
     theta = max(min(theta, 90), -90)
     psi   = normalize_angle(psi)
-
     return theta, psi
 
 # ------------------- ACCEL THREAD ----------------
 def accel_reader():
     global latest_theta, latest_psi
-
     while running:
         data = get_accel_lsb()
         if data:
             ax_lsb, ay_lsb, az_lsb = data
             ax, ay, az = lsb_to_g(ax_lsb, ay_lsb, az_lsb)
-
             theta, psi = compute_angles(ax, ay, az)
-
             with accel_lock:
                 latest_theta = theta
                 latest_psi = psi
@@ -93,7 +94,6 @@ def accel_reader():
 def move_motor_to_angle(target, get_angle, motor_id, name, min_angle, max_angle):
 
     target = max(min(target, max_angle), min_angle)
-    target = normalize_angle(target)
 
     print(f"\n--- Moving {name} to {target:.1f}° ---")
     start = time.time()
@@ -106,7 +106,7 @@ def move_motor_to_angle(target, get_angle, motor_id, name, min_angle, max_angle)
             continue
 
         current = normalize_angle(current)
-        error = angle_error(target, current)
+        error = shortest_angle_error(target, current)
 
         print(f"{name} = {current:+.2f}° | error = {error:+.2f}°")
 
@@ -133,7 +133,6 @@ def move_motor_to_angle(target, get_angle, motor_id, name, min_angle, max_angle)
 
 # ------------------- MAIN ----------------------
 try:
-    # Connexions
     print("Connecting accelerometer...")
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.connect((HOST, PORT))
@@ -147,22 +146,33 @@ try:
 
     stop_all()
 
-    # Démarrage thread accélération
     accel_thread = threading.Thread(target=accel_reader, daemon=True)
     accel_thread.start()
-    time.sleep(1)  # initialisation
+    time.sleep(1)
 
-    # Entrée utilisateur
     target_psi = float(input("Enter target Psi [-180,180]: "))
     target_theta = float(input("Enter target Theta [-90,90]: "))
 
-    # 🔹 Limite stable Theta
     target_theta = max(min(target_theta, THETA_SAFE), -THETA_SAFE)
+    target_psi = clamp_psi(target_psi)
 
-    # Mouvement Psi → Motor 2
-    move_motor_to_angle(target_psi, lambda : latest_psi, 2, "Psi", min_angle=-180, max_angle=180)
-    # Mouvement Theta → Motor 1
-    move_motor_to_angle(target_theta, lambda : latest_theta, 1, "Theta", min_angle=-THETA_SAFE, max_angle=THETA_SAFE)
+    move_motor_to_angle(
+        target_theta,
+        lambda: latest_theta,
+        1,
+        "Theta",
+        -THETA_SAFE,
+        THETA_SAFE
+    )
+
+    move_motor_to_angle(
+        target_psi,
+        lambda: latest_psi,
+        2,
+        "Psi",
+        -PSI_SAFE,
+        PSI_SAFE
+    )
 
     stop_all()
     print("\nObjectif atteint!")
