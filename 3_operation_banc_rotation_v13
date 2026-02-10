@@ -1,11 +1,4 @@
 #!/usr/bin/env python3
-"""
-Accelerometer calibration bench pilot
-Version STABLE – Scan automatique avec positions absolues
-Intégration logique camarade + affichage terminal détaillé
-Choix du mode : standard / rapide / lent
-Sécurité : Theta ±90° limité à ±88° pour éviter rotations complètes
-"""
 
 import json
 import csv
@@ -161,15 +154,7 @@ def sweep_psi(theta_cmd, psi_positions, ser, dataset):
         psi_target = clamp(psi_target, -PSI_SAFE, PSI_SAFE)
         print(f"    → Psi position {idx}/{len(psi_positions)} : {psi_target:+.1f}°")
 
-        move_motor(
-            psi_target,
-            lambda: latest_psi,
-            2,
-            "Psi",
-            -PSI_SAFE,
-            PSI_SAFE,
-            ser
-        )
+        move_motor(psi_target, lambda: latest_psi, 2, "Psi", -PSI_SAFE, PSI_SAFE, ser)
 
         with accel_lock:
             if latest_raw:
@@ -181,16 +166,7 @@ def sweep_psi(theta_cmd, psi_positions, ser, dataset):
                     f"ψ={latest_psi:+7.2f}° | |g|={norm:.3f}"
                 )
 
-                dataset.append([
-                    latest_ts,
-                    theta_cmd,
-                    latest_theta,
-                    latest_psi,
-                    ax,
-                    ay,
-                    az,
-                    norm
-                ])
+                dataset.append([latest_ts, theta_cmd, latest_theta, latest_psi, ax, ay, az, norm])
 
 # ---------------- MAIN SEQUENCE ----------------
 def run_sequence(config_path, ser):
@@ -215,15 +191,7 @@ def run_sequence(config_path, ser):
         psi_positions = step.get("psi_positions", [])
 
         print(f"\n=== ÉTAPE {step_idx}/{len(sequence)} ===")
-        move_motor(
-            theta_cmd,
-            lambda: latest_theta,
-            1,
-            "Theta",
-            -THETA_SAFE,
-            THETA_SAFE,
-            ser
-        )
+        move_motor(theta_cmd, lambda: latest_theta, 1, "Theta", -THETA_SAFE, THETA_SAFE, ser)
 
         if psi_positions:
             sweep_psi(theta_cmd, psi_positions, ser, dataset)
