@@ -1,10 +1,16 @@
 #!/usr/bin/env python3
 """
 Accelerometer calibration bench pilot
-Version STABLE : intégration logique camarade + scan automatique
+Version STABLE – Scan automatique avec positions absolues
+Intégration logique camarade + affichage terminal détaillé
 """
 
-import json, csv, math, socket, threading, time, os
+import json
+import csv
+import math
+import socket
+import threading
+import time
 from datetime import datetime
 from typing import Optional, Tuple
 
@@ -14,7 +20,7 @@ PORT = 3535
 SERIAL_PORT = "COM7"
 BAUDRATE = 115200
 
-SENSITIVITY = 256000.0
+SENSITIVITY = 256000.0  # LSB / g
 
 KP = 2.5
 MAX_SPEED = 30
@@ -26,13 +32,13 @@ SETTLE_TIME = 1.0
 TIMEOUT = 30
 
 THETA_SAFE = 89.0
-PSI_SAFE = 178.0   # JAMAIS ±180°
+PSI_SAFE = 178.0   # ne jamais atteindre ±180°
 
 # ---------------- SHARED STATE ----------------
 accel_lock = threading.Lock()
 latest_theta: Optional[float] = None
 latest_psi: Optional[float] = None
-latest_raw: Optional[Tuple[int,int,int]] = None
+latest_raw: Optional[Tuple[int, int, int]] = None
 latest_ts: Optional[str] = None
 running = True
 
@@ -55,10 +61,10 @@ def lsb_to_g(ax, ay, az):
 
 def compute_angles(ax, ay, az):
     eps = 1e-12
-    theta = math.degrees(math.atan2(ax, math.sqrt(ay*ay + az*az + eps)))
-    psi   = math.degrees(math.atan2(ay, az))
+    theta = math.degrees(math.atan2(ax, math.sqrt(ay * ay + az * az + eps)))
+    psi = math.degrees(math.atan2(ay, az))
     theta = clamp(theta, -90, 90)
-    psi   = normalize_angle(psi)
+    psi = normalize_angle(psi)
     return theta, psi
 
 def parse_asc3(line):
@@ -74,17 +80,22 @@ def accel_reader(sock):
     global latest_theta, latest_psi, latest_raw, latest_ts
     buf = ""
     sock.settimeout(1)
+
     while running:
         try:
             data = sock.recv(4096).decode(errors="ignore")
             buf += data
             lines = buf.split("\n")
             buf = lines[-1]
-            for l in lines[:-1]:
-                r = parse_asc3(l)
-                if not r: continue
-                ax, ay, az = lsb_to_g(*r)
-                theta, psi = compute_angles(ax, ay, az)
+
+            for line in lines[:-1]:
+                r = parse_asc3(line)
+                if not r:
+                    continue
+
+                ax_g, ay_g, az_g = lsb_to_g(*r)
+                theta, psi = compute_angles(ax_g, ay_g, az_g)
+
                 with accel_lock:
                     latest_theta = theta
                     latest_psi = psi
@@ -104,6 +115,8 @@ def move_motor(target, get_angle, motor_id, name, amin, amax, ser):
     target = clamp(target, amin, amax)
     start = time.time()
 
+    print(f"→ {name} cible : {target:+.1f}°")
+
     while running:
         with accel_lock:
             current = get_angle()
@@ -115,8 +128,11 @@ def move_motor(target, get_angle, motor_id, name, amin, amax, ser):
         current = normalize_angle(current)
         error = shortest_angle_error(target, current)
 
+        print(f"   {name} = {current:+6.2f}° | erreur = {error:+6.2f}°")
+
         if abs(error) < STOP_THRESHOLD:
             stop_all(ser)
+            print(f"✓ {name} atteint")
             break
 
         speed = KP * error
@@ -136,12 +152,12 @@ def move_motor(target, get_angle, motor_id, name, amin, amax, ser):
     time.sleep(SETTLE_TIME)
 
 # ---------------- SCAN LOGIC ----------------
-def sweep_psi(theta_cmd, psi_steps, ser, dataset):
-    psi_target = 0.0
+def sweep_psi(theta_cmd, psi_positions, ser, dataset):
+    print(f"  ↪ Balayage Psi (Theta = {theta_cmd:+.1f}°)")
 
-    for step in psi_steps:
-        psi_target += step
+    for idx, psi_target in enumerate(psi_positions, 1):
         psi_target = clamp(psi_target, -PSI_SAFE, PSI_SAFE)
+        print(f"    → Psi position {idx}/{len(psi_positions)} : {psi_target:+.1f}°")
 
         move_motor(
             psi_target,
@@ -156,24 +172,42 @@ def sweep_psi(theta_cmd, psi_steps, ser, dataset):
         with accel_lock:
             if latest_raw:
                 ax, ay, az = latest_raw
-                norm = math.sqrt(sum((v/SENSITIVITY)**2 for v in latest_raw))
+                norm = math.sqrt(sum((v / SENSITIVITY) ** 2 for v in latest_raw))
+
+                print(
+                    f"      [MESURE] θ={latest_theta:+6.2f}° | "
+                    f"ψ={latest_psi:+7.2f}° | |g|={norm:.3f}"
+                )
+
                 dataset.append([
-                    latest_ts, theta_cmd,
-                    latest_theta, latest_psi,
-                    ax, ay, az, norm
+                    latest_ts,
+                    theta_cmd,
+                    latest_theta,
+                    latest_psi,
+                    ax,
+                    ay,
+                    az,
+                    norm
                 ])
 
+# ---------------- MAIN SEQUENCE ----------------
 def run_sequence(config_path, ser):
     with open(config_path) as f:
-        seq = json.load(f)["sequence"]
+        sequence = json.load(f)["sequence"]
 
     dataset = []
 
-    for step in seq:
-        theta = clamp(step["theta"], -THETA_SAFE, THETA_SAFE)
+    print("\n=== INITIALISATION ===")
+    print("→ Positionnement initial Psi = +180°")
+    move_motor(180, lambda: latest_psi, 2, "Psi", -PSI_SAFE, PSI_SAFE, ser)
 
+    for step_idx, step in enumerate(sequence, 1):
+        theta_cmd = clamp(step["theta"], -THETA_SAFE, THETA_SAFE)
+        psi_positions = step.get("psi_positions", [])
+
+        print(f"\n=== ÉTAPE {step_idx}/{len(sequence)} ===")
         move_motor(
-            theta,
+            theta_cmd,
             lambda: latest_theta,
             1,
             "Theta",
@@ -182,30 +216,38 @@ def run_sequence(config_path, ser):
             ser
         )
 
-        if step["psi_steps"]:
-            sweep_psi(theta, step["psi_steps"], ser, dataset)
+        if psi_positions:
+            sweep_psi(theta_cmd, psi_positions, ser, dataset)
         else:
+            print("  (Pas de balayage Psi)")
             time.sleep(SETTLE_TIME)
 
-    # retour zéro
+    print("\n=== FIN DU SCAN ===")
+    print("→ Retour Psi = 0°, Theta = 0°")
+
     move_motor(0, lambda: latest_psi, 2, "Psi", -PSI_SAFE, PSI_SAFE, ser)
     move_motor(0, lambda: latest_theta, 1, "Theta", -THETA_SAFE, THETA_SAFE, ser)
 
-    # save CSV
     with open("scan_result.csv", "w", newline="") as f:
-        w = csv.writer(f)
-        w.writerow(["time","theta_cmd","theta","psi","x","y","z","norm"])
-        w.writerows(dataset)
+        writer = csv.writer(f)
+        writer.writerow(["time", "theta_cmd", "theta", "psi", "x", "y", "z", "norm"])
+        writer.writerows(dataset)
 
-# ---------------- MAIN ----------------
+    print("Scan terminé – CSV sauvegardé.")
+
+# ---------------- PROGRAM ENTRY ----------------
 if __name__ == "__main__":
     import serial
 
+    print("Connexion à l'accéléromètre…")
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.connect((HOST, PORT))
+    print("Accéléromètre connecté")
 
+    print("Connexion au contrôleur moteur…")
     ser = serial.Serial(SERIAL_PORT, BAUDRATE, timeout=1)
     time.sleep(2)
+    print("Moteurs connectés")
 
     threading.Thread(target=accel_reader, args=(sock,), daemon=True).start()
 
