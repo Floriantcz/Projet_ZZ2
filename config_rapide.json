@@ -1,11 +1,11 @@
 {
   "sequence": [
-    { "theta": 0,    "psi_positions": [] },
-    { "theta": 90,   "psi_positions": [] },
-    { "theta": 45,   "psi_positions": [180, 120, 60, 0, -60, -120, -180] },
-    { "theta": 0,    "psi_positions": [-180, -120, -60, 0, 60, 120, 180] },
-    { "theta": -45,  "psi_positions": [180, 120, 60, 0, -60, -120, -180] },
-    { "theta": -90,  "psi_positions": [] },
-    { "theta": 0,    "psi_positions": [] }
+    { "theta": 0,   "psi_positions": [] },
+    { "theta": 90,  "psi_positions": [] },
+    { "theta": 45,  "psi_positions": [60, 0, -60] },
+    { "theta": 0,   "psi_positions": [120, 60, 0, -60, -120] },
+    { "theta": -45, "psi_positions": [-60, 0, 60] },
+    { "theta": -90, "psi_positions": [] },
+    { "theta": 0,   "psi_positions": [] }
   ]
 }
