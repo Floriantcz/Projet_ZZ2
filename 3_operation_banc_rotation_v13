@@ -26,8 +26,8 @@ CONTROL_PERIOD = 0.05
 SETTLE_TIME = 1.0
 TIMEOUT = 30
 
-THETA_SAFE = 89.0
-PSI_SAFE = 178.0   # ne jamais atteindre ±180°
+THETA_SAFE = 88.0   # ne jamais atteindre ±90°
+PSI_SAFE = 179.0   # ne jamais atteindre ±180°
 
 # ---------------- SHARED STATE ----------------
 accel_lock = threading.Lock()
