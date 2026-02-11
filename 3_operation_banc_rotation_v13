@@ -12,7 +12,7 @@ from typing import Optional, Tuple
 # ---------------- CONFIG ----------------
 HOST = "192.168.4.1"
 PORT = 3535
-SERIAL_PORT = "COM7"
+SERIAL_PORT = "COM9"
 BAUDRATE = 115200
 
 SENSITIVITY = 256000.0  # LSB / g
@@ -26,7 +26,7 @@ CONTROL_PERIOD = 0.05
 SETTLE_TIME = 1.0
 TIMEOUT = 30
 
-THETA_SAFE = 88.0   # ne jamais atteindre ±90°
+THETA_SAFE = 85.0   # ne jamais atteindre ±90°
 PSI_SAFE = 179.0   # ne jamais atteindre ±180°
 
 # ---------------- SHARED STATE ----------------
