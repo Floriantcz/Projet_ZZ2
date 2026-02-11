@@ -1,0 +1,94 @@
+import numpy as np
+import pandas as pd
+from matplotlib import pyplot as plt
+
+# Load Calibration Parameters
+def load_calibration_parameters(filename):
+    with open(filename, 'r') as f:
+        lines = f.readlines()
+    
+    # Bias is at row 2 (after headers), A_inv at rows 4-6
+    bias = np.fromstring(lines[2], sep=',')
+    A_inv = np.array([np.fromstring(lines[i], sep=',') for i in range(5, 8)])
+
+    return bias, A_inv
+    
+# Load Raw Measurement Data
+def load_measurements(filename):
+    data_lsb = np.loadtxt(filename, # Raw data in lsb unit
+                      delimiter=',', 
+                      skiprows=1,                  
+                      usecols=(1, 2, 3))
+    
+    # Convert to g unit based on manufacturer datasheet
+    sensitivity = 256000 # Scale factor of 1/256000 g/LSB
+    data_g = data_lsb/sensitivity # Raw data in g unit
+    
+    return data_g
+    
+# Apply Calibration
+def apply_calibration(data, b, A_1):
+    result = []
+    for row in data:
+        x_off = row[0] - b[0]
+        y_off = row[1] - b[1]
+        z_off = row[2] - b[2]
+
+        x_cal = x_off * A_1[0,0] + y_off * A_1[0,1] + z_off * A_1[0,2]
+        y_cal = x_off * A_1[1,0] + y_off * A_1[1,1] + z_off * A_1[1,2]
+        z_cal = x_off * A_1[2,0] + y_off * A_1[2,1] + z_off * A_1[2,2]
+
+        result.append([x_cal, y_cal, z_cal])
+
+    return np.array(result)
+    
+# Save Calibrated Data
+def save_calibrated_data(raw_filename, calibrated_data):
+    output_file = raw_filename.replace(".csv", "_calibrated.csv")
+    df = pd.DataFrame(calibrated_data, columns=['x_g', 'y_g', 'z_g'])
+    df.to_csv(output_file, index=False, float_format='%.9f')
+    return output_file
+    
+# Plot Comparison Raw vs Calibrated Data
+def plot_comparison(raw, calibrated):
+        fig = plt.figure(figsize=(15, 10))
+        
+        # 2D Plots
+        planes = ['XY', 'YZ', 'XZ']
+        for i, (x, y) in enumerate([(0, 1), (1, 2), (0, 2)]):
+            ax = fig.add_subplot(2, 2, i+1)
+            ax.plot(raw[:, x], raw[:, y], 'b.', alpha=0.5, label='Raw')
+            ax.plot(calibrated[:, x], calibrated[:, y], 'r.', alpha=0.5, label='Calibrated')
+            ax.set_title(f'{planes[i]} Plane')
+            ax.set_xlabel(f'{planes[i][0]} [g]')
+            ax.set_ylabel(f'{planes[i][1]} [g]')
+            ax.axis('equal')
+            ax.grid()
+            ax.legend()
+
+        # 3D Plot
+        ax3d = fig.add_subplot(2, 2, 4, projection='3d')
+        ax3d.scatter(raw[:, 0], raw[:, 1], raw[:, 2], c='b', label='Raw', alpha=0.3)
+        ax3d.scatter(calibrated[:, 0], calibrated[:, 1], calibrated[:, 2], c='r', label='Calibrated', alpha=0.3)
+        ax3d.set_title('3D Comparison')
+        ax3d.set_xlabel('X [g]')
+        ax3d.set_ylabel('Y [g]')
+        ax3d.set_zlabel('Z [g]')
+        ax3d.axis('equal')
+        ax3d.legend()
+
+        plt.tight_layout()
+        plt.show()
+
+# Main Workflow
+if __name__ == "__main__":
+    raw_data_file = 'ADXL355_rawdata_20.0C_20250520_164608.csv'
+    parameter_file = 'ADXL355_rawdata_20.0C_20250520_164608_parameters.csv'
+        
+    b, A_1 = load_calibration_parameters(parameter_file)
+    raw_data = load_measurements(raw_data_file)
+    calibrated_data = apply_calibration(raw_data, b, A_1)
+    output_file = save_calibrated_data(raw_data_file, calibrated_data)
+
+    print("Calibration applied and saved to:", output_file)
+    plot_comparison(raw_data, calibrated_data)

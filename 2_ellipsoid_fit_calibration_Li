@@ -1,0 +1,306 @@
+import numpy as np
+import pandas as pd
+from scipy import linalg
+from matplotlib import pyplot as plt
+from pathlib import Path
+
+#required data input file: x,y,z lsb values in .csv (text, comma separated value) format.
+  
+class Accelerometer(object):
+    
+    '''
+        Accelerometer calibration using ellipsoid fitting
+    References:
+        - Adapted from magnetometer calibration code
+            -  https://github.com/jremington/LSM9DS1-AHRS/blob/main/calibrate3.py
+            -  https://teslabs.com/articles/magnetometer-calibration/      
+            -  https://github.com/nliaudat/magnetometer_calibration/blob/main/calibrate.py
+        - Uses Li's ellipsoid specific fitting method
+            -  https://ieeexplore.ieee.org/document/1290055
+        
+    '''
+    Gravity = 1.0  # 1 g norm of gravitational acceleration
+
+    def __init__(self, input_file, F=Gravity): 
+
+
+        # initialize values
+        self.F   = F # 1g
+        self.input_file = Path(input_file)
+        self.b   = np.zeros([3, 1]) # Bias zero-g offset, b
+        self.A_1 = np.eye(3) # Scale & misalignment correction, A^(-1)
+
+    def run(self):
+        # 1. Load and preprocess
+        raw_data = self.load_data()
+        
+        # 2. Calibrate
+        self.compute_calibration_parameters(raw_data)
+        calibrated_data = self.calibrate(raw_data)
+        
+        # 3. Save results
+        self.save_parameters()
+        self.save_calibrated_data(calibrated_data)
+        
+        # 4. Visualize
+        self.plot_comparison(raw_data, calibrated_data)
+
+        # 5. Evaluate calibration quality
+        self.evaluate_calibration_quality(calibrated_data, tolerance=0.01)
+        self.plot_norm_distribution(np.linalg.norm(calibrated_data, axis=1))
+
+    def load_data(self):
+        df = pd.read_csv(self.input_file)
+        data_lsb = df.loc[:, ["x_lsb","y_lsb","z_lsb"]].values.astype(float) # Raw data in LSB unit    
+        #data_g = df.iloc[:, 0:3].values.astype(float) # If use raw data in g unit
+        #data_lsb = df.iloc[:, 0:3].values.astype(float) # If use raw data in LSB unit after low pass filter
+        
+        # Convert to g unit based on manufacturer datasheet
+        sensitivity = 256000  # Scale factor of 1/256000 g/LSB
+        data_g = data_lsb / sensitivity
+
+        print("Shape of data array:", data_g.shape)
+        print(f"\nData normalized to {self.F}g\nFirst 5 rows raw:\n", data_g[:5])
+        return data_g # Raw data in g unit    
+
+    def compute_calibration_parameters(self, data): # Apply ellipsoid fit
+        s = np.array(data).T
+        M, n, d = self.ellipsoid_fit(s)
+
+        # calibration error parameters
+        M_1 = linalg.inv(M) #M^(-1)
+        self.b = -np.dot(M_1, n) # Zero-g offset
+        self.A_1 = np.real(self.F / np.sqrt(np.dot(n.T, np.dot(M_1, n)) - d) * linalg.sqrtm(M)) #Combined correction matrix A^(-1)
+        self.A = np.linalg.inv(self.A_1)
+        self.S = np.diag(np.diag(self.A))
+        self.N = self.A @ np.linalg.inv(self.S) 
+
+        print("\nZero-g offset (bias), b [g]:\n", self.b.flatten())
+        print("\nScale and misalignment correction matrix, A^(-1):\n", self.A_1)
+        print("\nCombined scale and misalignment matrix, A):\n", self.A)
+        print("\nSensitivity error, S):\n", self.S)
+        print("\nMisalignement error, N):\n", self.N)
+
+
+    def calibrate(self, data): # Calibrate the raw data using the obtained parameters
+        result = []
+        for row in data:
+            
+            # subtract bias (zero-g offset)
+            x_off = row[0] - self.b[0]
+            y_off = row[1] - self.b[1]
+            z_off = row[2] - self.b[2]
+
+            #multiply by the inverse correction matrix
+            x_cal = x_off * self.A_1[0, 0] + y_off * self.A_1[0, 1] + z_off * self.A_1[0, 2]
+            y_cal = x_off * self.A_1[1, 0] + y_off * self.A_1[1, 1] + z_off * self.A_1[1, 2]
+            z_cal = x_off * self.A_1[2, 0] + y_off * self.A_1[2, 1] + z_off * self.A_1[2, 2]
+            
+            result.append([x_cal, y_cal, z_cal])
+        result = np.array(result)
+
+        print("\nFirst 5 rows calibrated:\n")
+        for row in result[:5]:
+            print(row.flatten())
+        return result
+
+    def save_parameters(self):
+        param_path = self.input_file.with_name(self.input_file.stem + "_parameters-Li.csv")
+        with param_path.open('w', newline='') as f:
+            f.write(f'Calibration parameters for {self.input_file.name}\n')
+            f.write('Zero-g offset (bias) [g] (b_x, b_y, b_z)\n')
+            f.write(f'{self.b[0][0]:.9f}, {self.b[1][0]:.9f}, {self.b[2][0]:.9f}\n\n')
+            f.write('Combined scale and misalignment matrix, A\n')
+            for row in self.A:
+                f.write(f"{row[0]:.9f}, {row[1]:.9f}, {row[2]:.9f}\n")
+            f.write('\nScale and misalignment correction matrix, A^(-1)\n')
+            for row in self.A_1:
+                f.write(f"{row[0]:.9f}, {row[1]:.9f}, {row[2]:.9f}\n")
+            f.write('\nSensitivity error, S\n')
+            for row in self.S:
+                f.write(f"{row[0]:.9f}, {row[1]:.9f}, {row[2]:.9f}\n")
+            f.write('\nCross-axis non-orthogonality, N\n')
+            for row in self.N:
+                f.write(f"{row[0]:.9f}, {row[1]:.9f}, {row[2]:.9f}\n")
+        print(f"\nSaved calibration parameters to: {param_path}")
+
+    def save_calibrated_data(self, result):
+        calib_path = self.input_file.with_name(self.input_file.stem + "_calib-Li.csv")
+        # Ensure shape is in 2D
+        result_2d = np.squeeze(result) # Remove dimensions with size 1
+        calib_df = pd.DataFrame(result_2d, columns=['x_g', 'y_g', 'z_g'])
+        calib_df.to_csv(calib_path, index=False)
+        print(f"\nSaved calibrated data to: {calib_path}")
+
+    def plot_comparison(self, raw, calibrated):
+        fig = plt.figure(figsize=(15, 10))
+        
+        # 2D Plots
+        planes = ['XY', 'YZ', 'XZ']
+        for i, (x, y) in enumerate([(0, 1), (1, 2), (0, 2)]):
+            ax = fig.add_subplot(2, 2, i+1)
+            ax.plot(raw[:, x], raw[:, y], 'b.', alpha=0.5, label='Raw')
+            ax.plot(calibrated[:, x], calibrated[:, y], 'r.', alpha=0.5, label='Calibrated')
+            ax.set_title(f'{planes[i]} Plane')
+            ax.set_xlabel(f'{planes[i][0]} [g]')
+            ax.set_ylabel(f'{planes[i][1]} [g]')
+            ax.axis('equal')
+            ax.grid()
+            ax.legend()
+
+        # 3D Plot
+        ax3d = fig.add_subplot(2, 2, 4, projection='3d')
+        ax3d.scatter(raw[:, 0], raw[:, 1], raw[:, 2], c='b', label='Raw', alpha=0.3)
+        ax3d.scatter(calibrated[:, 0], calibrated[:, 1], calibrated[:, 2], c='r', label='Calibrated', alpha=0.3)
+        ax3d.set_title('3D Comparison')
+        ax3d.set_xlabel('X [g]')
+        ax3d.set_ylabel('Y [g]')
+        ax3d.set_zlabel('Z [g]')
+        ax3d.axis('equal')
+        ax3d.legend()      
+
+        # Compare 
+        fig2, axs = plt.subplots(1, 2, figsize=(14, 6))
+        fig2.suptitle("2D Plane Overlays: Raw vs Calibrated", fontsize=16)
+
+        # Plane definitions
+        planes = ['XY', 'XZ', 'YZ']
+        indices = [(0, 1), (0, 2), (1, 2)]
+        colors = ['blue', 'orange', 'green']
+
+        # Raw Data Plot
+        axs[0].set_title('Raw Data Overlay')
+        for (x, y), color, label in zip(indices, colors, planes):
+            axs[0].plot(raw[:, x], raw[:, y], '.', color=color, alpha=0.5, label=label)
+        axs[0].set_xlabel('Axis 1 [g]')
+        axs[0].set_ylabel('Axis 2 [g]')
+        axs[0].axis('equal')
+        axs[0].grid()
+        axs[0].legend()
+
+        # Calibrated Data Plot
+        axs[1].set_title('Calibrated Data Overlay')
+        for (x, y), color, label in zip(indices, colors, planes):
+            axs[1].plot(calibrated[:, x], calibrated[:, y], '.', color=color, alpha=0.5, label=label)
+        axs[1].set_xlabel('Axis 1 [g]')
+        axs[1].set_ylabel('Axis 2 [g]')
+        axs[1].axis('equal')
+        axs[1].grid()
+        axs[1].legend()
+
+        plt.tight_layout()
+        plt.subplots_adjust(top=0.88)
+
+
+        plt.tight_layout()
+        plt.show()
+    
+    def evaluate_calibration_quality(self, calibrated_data, tolerance=0.01):
+        """
+        Evaluate the calibration quality of accelerometer data.
+
+        Parameters:
+            calibrated_data (np.ndarray): Nx3 array of calibrated accelerometer readings in g.
+            tolerance (float): Acceptable deviation from unit norm (default ±1%).
+
+        Returns:
+            dict: Metrics including min, max, mean norm, std, % inside tolerance, and flags.
+        """
+        norms = np.linalg.norm(calibrated_data, axis=1)
+        
+        stats = {
+            'min_norm': float(np.min(norms)),
+            'max_norm': float(np.max(norms)),
+            'mean_norm': float(np.mean(norms)),
+            'std_norm': float(np.std(norms)),
+            'within_tolerance (%)': float(np.mean(np.abs(norms - 1.0) <= tolerance) * 100)
+        }
+
+        stats['passed'] = stats['within_tolerance (%)'] > 95.0  # >95% within tolerance = pass
+
+        print("\n--- Calibration Quality Report ---")
+        for key, val in stats.items():
+            print(f"{key}: {val:.6f}" if isinstance(val, float) else f"{key}: {val}")
+        return stats
+
+    def plot_norm_distribution(self, norms):
+        plt.figure(figsize=(8,4))
+        plt.hist(norms, bins=50, alpha=0.7, color='steelblue')
+        plt.axvline(1.0, color='red', linestyle='--', label='Ideal (1g)')
+        plt.title("Distribution of Norms (Post-Calibration)")
+        plt.xlabel("Norm (g)")
+        plt.ylabel("Frequency")
+        plt.legend()
+        plt.grid(True)
+        plt.tight_layout()
+        plt.show()
+                      
+    def ellipsoid_fit(self, s):
+        ''' Estimate ellipsoid parameters from a set of points.
+
+            Parameters
+            ----------
+            s : array_like
+              The samples (M,N) where M=3 (x,y,z) and N=number of samples.
+
+            Returns
+            -------
+            M, n, d : array_like, array_like, float
+              The ellipsoid parameters M, n, d.
+
+            References
+            ----------
+            .. [1] Qingde Li; Griffiths, J.G., "Least squares ellipsoid specific
+               fitting," in Geometric Modeling and Processing, 2004.
+               Proceedings, vol., no., pp.335-340, 2004
+        '''
+
+         # Form design matrix
+         # D (samples) 
+        D = np.array([s[0]**2., s[1]**2., s[2]**2.,
+                      2.*s[1]*s[2], 2.*s[0]*s[2], 2.*s[0]*s[1],
+                      2.*s[0], 2.*s[1], 2.*s[2], np.ones_like(s[0])])
+
+        # S, S_11, S_12, S_21, S_22 (eq. 11)
+        S = np.dot(D, D.T)
+        S_11 = S[:6,:6]
+        S_12 = S[:6,6:]
+        S_21 = S[6:,:6]
+        S_22 = S[6:,6:]
+
+        # C (Eq. 8, k=4)
+        C = np.array([[-1,  1,  1,  0,  0,  0],
+                      [ 1, -1,  1,  0,  0,  0],
+                      [ 1,  1, -1,  0,  0,  0],
+                      [ 0,  0,  0, -4,  0,  0],
+                      [ 0,  0,  0,  0, -4,  0],
+                      [ 0,  0,  0,  0,  0, -4]])
+
+        # v_1 (eq. 15, solution)
+        E = np.dot(linalg.inv(C),
+                   S_11 - np.dot(S_12, np.dot(linalg.inv(S_22), S_21)))
+
+        E_w, E_v = np.linalg.eig(E)
+
+        v_1 = E_v[:, np.argmax(E_w)]
+        if v_1[0] < 0: v_1 = -v_1
+
+        # v_2 (eq. 13, solution)
+        v_2 = np.dot(np.dot(-np.linalg.inv(S_22), S_21), v_1)
+
+        # quadratic-form parameters, parameters h and f swapped as per correction by Roger R on Teslabs page
+        M = np.array([[v_1[0], v_1[5], v_1[4]],
+                      [v_1[5], v_1[1], v_1[3]],
+                      [v_1[4], v_1[3], v_1[2]]])
+        n = np.array([[v_2[0]],
+                      [v_2[1]],
+                      [v_2[2]]])
+        d = v_2[3]
+
+        return M, n, d
+        
+if __name__=='__main__':
+        input_file = "scan_dataset_1770027149.csv" # Replace with your file
+        Accelerometer(input_file).run()
+        
+        

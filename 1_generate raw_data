@@ -1,0 +1,147 @@
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from datetime import datetime
+from pathlib import Path
+from mpl_toolkits.mplot3d import Axes3D
+
+
+def generate_test_data(temp=20.0, sample_rate=100):
+    """
+    Simulate raw accelerometer-like data with known distortions in 2 full rotations.
+    - b: Zero-g offsets (bias)
+    - S: Scale factors
+    - N: Non-orthogonality of sensor axis (axis misalignment)
+    Returns: noisy raw data array (shape: [N, 3])
+    Also writes to a CSV file named with the temperature and timestamp.
+    """
+    # === 1. Generate ideal motion data ===
+    # First rotation (about Y axis)
+    theta = np.linspace(-np.pi, np.pi, 20) #-180° to 180° rotation
+    x1 = -np.sin(theta)
+    y1 = np.zeros_like(theta)
+    z1 = -np.cos(theta)
+    
+    # Second rotation (about X axis) 
+    phi = np.linspace(-np.pi, np.pi, 20) #-180° to 180° rotation
+    x2 = np.zeros_like(phi)
+    y2 = -np.sin(phi)
+    z2 = -np.cos(phi)
+   
+    # Combine motion data
+    ideal = np.vstack([
+        np.column_stack([x1, y1, z1]),
+        np.column_stack([x2, y2, z2])
+    ]) # shape: (400, 3) acceleration in g
+    
+    # === 2. Apply known sensor imperfections ===
+    # Add sensor imperfection error parameters
+    '''
+    # Ideal sensor
+    true_b = np.array([0, 0, 0])  # zero-g offset (bias) in g
+    true_S = np.diag([1, 1, 1])    # Scale factors in g/g
+    true_N = np.array([  # Non-orthogonality of sensor axis (axis misalignment)
+        [1, 0, 0],
+        [0, 1, 0],
+        [0, 0, 1]
+    ])
+    '''
+    true_b = np.array([0.002, 0.005, 0.01])  # zero-g offset (bias) in g
+    true_S = np.diag([1.02, 0.99, 1.05])    # Scale factors in g/g
+    true_N = np.array([  # Non-orthogonality of sensor axis (axis misalignment)
+        [1.00, 0, 0],
+        [0, 1.00, 0],
+        [0, 0, 1.00]
+
+        #[1.00, 0.01, -0.005],
+        #[0.01, 1.00, 0.008],
+        #[-0.005, 0.008, 1.00]
+    ])
+    
+    true_A = true_N @ true_S # Combined scale and misalignment matrix A
+    true_A_1 = np.linalg.inv(true_A) # Combined correction matrix A^(-1)
+    S = np.diag(np.diag(true_A))
+    N = true_A @ np.linalg.inv(S) 
+
+    print("True Zero-g offset (bias), b:\n",true_b)
+    print("True combined scale and misalignment matrix, A:\n",true_A)
+    print("True Scale and misalignment correction matrix, A^(-1):\n",true_A_1)
+   
+
+    # Apply sensor errors transformations
+    distorted_g = (true_A @ ideal.T).T + true_b # Distorted data in g
+
+    # Convert to LSB unit
+    sensitivity = 256000 #Scale factor of 1/256000 g/LSB according to manufacturer
+    distorted_lsb = distorted_g * sensitivity # Distorted data in LSB
+
+    # Apply noise 
+    noisy = distorted_lsb #+ np.random.normal(0, 64, distorted_lsb.shape) # Noisy data in LSB
+    
+    # === 3. Write to CSV with temp in filename ===
+    num_samples = noisy.shape[0]
+    timestamps = np.round(np.arange(num_samples) / sample_rate, 4)
+    #temp_noise = np.round(temp + np.random.normal(0, 0.1, num_samples), 2) # Temperature noise
+
+    df = pd.DataFrame({
+        'timestamp': timestamps,
+        'x_lsb': noisy[:, 0].astype(int),
+        'y_lsb': noisy[:, 1].astype(int),
+        'z_lsb': noisy[:, 2].astype(int),
+        #'temperature_C': temp_noise
+    })
+    
+    timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    filename = f"ADXL355_data_{temp:.1f}C_{timestamp_str}.csv"
+    df.to_csv(filename, index=False)
+    
+    print(f"Generated {num_samples} samples at {temp}°C into {filename}")
+    
+    #Save calibration parameters
+    param_path = Path(f"ADXL355_data_{temp:.1f}C_{timestamp_str}_true-parameters.csv")
+    with param_path.open('w', newline='') as f:
+            f.write(f'True calibration parameters for {filename}\n')
+            f.write('Zero-g offset (bias) [g] (b_x, b_y, b_z)\n')
+            f.write(f'{true_b[0]:.9f}, {true_b[1]:.9f}, {true_b[2]:.9f}\n\n')
+            f.write('Combined scale and misalignment matrix, A\n')
+            for row in true_A:
+                f.write(f"{row[0]:.9f}, {row[1]:.9f}, {row[2]:.9f}\n")
+            f.write('\nScale and misalignment correction matrix, A^(-1)\n')
+            for row in true_A_1:
+                f.write(f"{row[0]:.9f}, {row[1]:.9f}, {row[2]:.9f}\n")
+            f.write('\nSensitivity error, S\n')
+            for row in S:
+                f.write(f"{row[0]:.9f}, {row[1]:.9f}, {row[2]:.9f}\n")
+            f.write('\nCross-axis non-orthogonality, N\n')
+            for row in N:
+                f.write(f"{row[0]:.9f}, {row[1]:.9f}, {row[2]:.9f}\n")            
+    print(f"\nSaved true calibration parameters to: {param_path}")
+
+    # === 4. Plot simulated accelerometer outputs ===
+    fig = plt.figure(figsize=(8, 6))
+    ax = fig.add_subplot(111, projection='3d')
+
+    Ax, Ay, Az = ideal[:, 0], ideal[:, 1], ideal[:, 2]
+
+    ax.plot(Ax, Ay, Az, lw=2, color='b', label='Ideal Motion Path')
+
+    # Distorted (raw) data scatter
+    distorted_g = (true_A @ ideal.T).T + true_b
+    ax.scatter(distorted_g[:, 0], distorted_g[:, 1], distorted_g[:, 2],
+               s=10, color='r', alpha=0.5, label='Raw (Distorted) Data')
+    
+    # Axis labels and formatting
+    ax.set_xlabel('Ax (g)')
+    ax.set_ylabel('Ay (g)')
+    ax.set_zlabel('Az (g)')
+    ax.set_title('3D Accelerometer Motion (Y rotation + X rotation)')
+    ax.legend()
+    ax.grid(True)
+    ax.view_init(elev=25, azim=45)
+    plt.show()
+
+    return noisy
+
+if __name__ == "__main__":
+    generate_test_data(temp=20.0)

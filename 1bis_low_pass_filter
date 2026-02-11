@@ -1,0 +1,46 @@
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+
+def low_pass_filter(data, alpha=0.1):
+    filtered_data = np.zeros_like(data)
+    filtered_data[0] = data[0]
+    for i in range(1, len(data)):
+        filtered_data[i] = alpha * data[i] + (1 - alpha) * filtered_data[i - 1]
+    return filtered_data
+
+# Save filtered data
+def save_filtered_data(filename, filtered_data):
+    output_file = filename.replace(".csv","_filtered.csv")
+    df = pd.DataFrame(filtered_data, columns=['x_g', 'y_g', 'z_g'])
+    df.to_csv(output_file, index=False, float_format='%.0f')
+    return output_file
+
+def main(file_path, alpha):
+    # 1. Load raw accelerometer data
+    df = pd.read_csv(file_path)  
+    raw_data = df.iloc[:, 1:4].values.astype(float)
+
+    # 2. Apply filter
+    filtered_data = low_pass_filter(raw_data, alpha)
+
+    # 3. Visualize result 
+    plt.figure(figsize=(10, 6))
+    for i, axis in enumerate(['X', 'Y', 'Z']):
+        plt.subplot(3, 1, i+1)
+        plt.plot(raw_data[:, i], label=f'Raw {axis}', alpha=0.5)
+        plt.plot(filtered_data[:, i], label=f'Filtered {axis}', linewidth=1.5)
+        plt.legend()
+        plt.grid()
+    plt.tight_layout()
+    plt.show()
+
+    # 4. Save filtered result
+    output_file = save_filtered_data(file_path, filtered_data)
+    print("Low pass filter applied and saved to:", output_file)
+
+if __name__ == "__main__":
+    input_file = "accelerometer_log_20250520_143125.csv"  # Replace with your actual CSV file
+    filter_alpha = 0.05                     # 0.05–0.2 typical; lower = smoother but slower to respond; higher = more real-time changes but less suppression
+
+    main(input_file, filter_alpha)

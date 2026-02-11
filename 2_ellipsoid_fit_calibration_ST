@@ -1,0 +1,162 @@
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+
+def ellipsoid_fit_st(XYZ):
+    """
+    Ellipsoid fitting based on ST DT0059 Rev3
+    Supports rotated ellipsoid (f=0)
+    Returns offsets, gains, and rotation matrix
+    """
+    x, y, z = XYZ[:,0], XYZ[:,1], XYZ[:,2]
+    # Use the ST alternative equation system for near-spherical data with little rotation
+    x2, y2, z2 = x*x, y*y, z*z
+    D = np.column_stack([
+        x2 + y2 - 2*z2,
+        x2 - 2*y2 + z2,
+        4*x*y,
+        2*x*z,
+        2*y*z,
+        2*x,
+        2*y,
+        2*z,
+        np.ones_like(x)
+    ])
+    R = x2 + y2 + z2
+    # Least squares solution
+    b = np.linalg.lstsq(D, R, rcond=None)[0]
+
+    # ST reference transformation
+    mtxref = np.array([
+        [3,1,1,0,0,0,0,0,0,0],
+        [3,1,-2,0,0,0,0,0,0,0],
+        [3,-2,1,0,0,0,0,0,0,0],
+        [0,0,0,2,0,0,0,0,0,0],
+        [0,0,0,0,1,0,0,0,0,0],
+        [0,0,0,0,0,1,0,0,0,0],
+        [0,0,0,0,0,0,1,0,0,0],
+        [0,0,0,0,0,0,0,1,0,0],
+        [0,0,0,0,0,0,0,0,1,0],
+        [0,0,0,0,0,0,0,0,0,1]
+    ])
+    v = mtxref @ np.concatenate([[-1/3], b])
+    nn = v[9]
+    v = -v[:9]
+
+    # Build A4 and A3
+    A = np.array([
+        [v[0], v[3], v[4], v[6]],
+        [v[3], v[1], v[5], v[7]],
+        [v[4], v[5], v[2], v[8]],
+        [v[6], v[7], v[8], -nn]
+    ])
+    A3 = A[:3,:3]
+    vghi = np.array([v[6], v[7], v[8]])
+
+    # Offset (center)
+    b_offset = -np.linalg.solve(A3, vghi)
+
+    # Translate to origin
+    T = np.eye(4)
+    T[3,:3] = b_offset
+    AT = T @ A @ T.T
+    B3 = AT[:3,:3] / -AT[3,3]
+
+    # Eigen-decomposition: rotation matrix and gains
+    evals, R = np.linalg.eigh(B3)
+    gains = np.sqrt(1.0 / evals)
+
+    return b_offset, gains, R
+
+def refine_rotation(gains, R):
+    """ST rotation refinement: largest coefficients along diagonal, positive"""
+    # ===== 1. Find largest absolute element in R =====
+    max_val = 0
+    rm = 0
+    cm = 0
+    for r in range(3):
+        for c in range(3):
+            if abs(R[r, c]) > max_val:
+                max_val = abs(R[r, c])
+                rm = r
+                cm = c
+
+    # Swap columns so largest element is on the diagonal
+    if rm != cm:
+        R[:, [cm, rm]] = R[:, [rm, cm]]
+        gains[[cm, rm]] = gains[[rm, cm]]
+
+    # ===== 2. Remaining 2×2 submatrix =====
+    # Determine remaining indices
+    remaining = [i for i in range(3) if i != rm]
+
+    max_val = 0
+    rm2 = 0
+    cm2 = 0
+    for r in remaining:
+        for c in remaining:
+            if abs(R[r, c]) > max_val:
+                max_val = abs(R[r, c])
+                rm2 = r
+                cm2 = c
+
+    # Swap remaining cols if needed
+    if rm2 != cm2:
+        R[:, [cm2, rm2]] = R[:, [rm2, cm2]]
+        gains[[cm2, rm2]] = gains[[rm2, cm2]]
+
+    # ===== 3. Make diagonal entries positive =====
+    for i in range(3):
+        if R[i, i] < 0:
+            R[:, i] = -R[:, i]
+
+    return gains, R
+
+def compute_calibration_matrices(gains, R):
+    """Compute A, A_1, S, N matrices"""
+    A = R @ np.diag(gains)        # combined scale + misalignment
+    A_1 = np.linalg.inv(A)        # calibration matrix
+    S = np.diag(np.diag(A))       # scale matrix
+    N = A @ np.linalg.inv(S)      # cross-axis misalignment
+    return A, A_1, S, N
+
+def calibrate_data(XYZ, b, A_1):
+    """Apply offset and calibration"""
+    return (XYZ - b) @ A_1.T
+
+def main(input_csv):
+    df = pd.read_csv(input_csv)
+    sensitivity = 256000.0
+    data = df[['x_lsb','y_lsb','z_lsb']].values / sensitivity
+
+    b_offset, gains, R = ellipsoid_fit_st(data)
+    gains, R = refine_rotation(gains, R)
+    A, A_1, S, N = compute_calibration_matrices(gains, R)
+    data_cal = calibrate_data(data, b_offset, A_1)
+
+    # Display results
+    print("Offsets b:", b_offset)
+    print("Gains:", gains)
+    print("Rotation matrix R:\n", R)
+    print("Combined matrix A:\n", A)
+    print("Calibration matrix A^-1:\n", A_1)
+    print("Scale matrix S:\n", S)
+    print("Cross-axis misalignment N:\n", N)
+    print("Calibrated range per axis:", np.ptp(data_cal, axis=0))
+    print("Calibrated min per axis:", np.min(data_cal, axis=0))
+    print("Calibrated max per axis:", np.max(data_cal, axis=0))
+    print("Calibrated mean per axis:", np.mean(data_cal, axis=0))
+
+    # Plot raw vs calibrated
+    fig = plt.figure(figsize=(10,5))
+    ax1 = fig.add_subplot(121, projection='3d')
+    ax1.scatter(data[:,0], data[:,1], data[:,2], s=2, color='blue', alpha=0.3)
+    ax1.set_title("Raw Data")
+    ax2 = fig.add_subplot(122, projection='3d')
+    ax2.scatter(data_cal[:,0], data_cal[:,1], data_cal[:,2], s=2, color='red', alpha=0.3)
+    ax2.set_title("Calibrated Data → Unit Sphere")
+    plt.show()
+
+if __name__ == "__main__":
+    input_file = "ADXL355_data_20.0C_20251114_135623.csv"
+    main(input_file)
