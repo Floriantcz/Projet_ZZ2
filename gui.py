@@ -86,8 +86,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.status_label.setStyleSheet("color: blue;")
 
     def action_abort(self):
+        banc_code.paused = True
         banc_code.running = False
-        banc_code.paused = False
         self.status_label.setText("🛑 ABANDON")
         self.status_label.setStyleSheet("color: red;")
 
