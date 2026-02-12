@@ -1,0 +1,22 @@
+{
+  "sequence": [
+    {
+      "theta": 0.0,
+      "psi_positions": [
+        180.0
+      ]
+    },
+    {
+      "theta": 0.0,
+      "psi_positions": [
+        0.0
+      ]
+    },
+    {
+      "theta": 0.0,
+      "psi_positions": [
+        -180.0
+      ]
+    }
+  ]
+}
