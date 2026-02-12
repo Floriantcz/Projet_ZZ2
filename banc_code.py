@@ -7,6 +7,7 @@ import threading
 import time
 from datetime import datetime
 from typing import Optional, Tuple
+
 # ---------------- CONFIG ----------------
 HOST = "192.168.4.1"
 PORT = 3535
@@ -22,42 +23,67 @@ SETTLE_TIME = 1.0
 TIMEOUT = 30
 THETA_SAFE = 85.0
 PSI_SAFE = 179.0
+
 # ---------------- SHARED STATE ----------------
 accel_lock = threading.Lock()
 latest_theta: Optional[float] = None
 latest_psi: Optional[float] = None
 latest_raw: Optional[Tuple[int, int, int]] = None
 latest_ts: Optional[str] = None
+
 running = True
 paused = False
+progress_val = 0  # Progression en %
+
+# ---------------- NEW PAUSE / RESUME ----------------
+def pause_system():
+    global paused
+    if not paused:
+        paused = True
+        print("⏸ PAUSE ACTIVÉE")
+
+def resume_system():
+    global paused
+    if paused:
+        paused = False
+        print("▶ REPRISE DEMANDÉE")
+
 # ---------------- UTILS ----------------
 def now():
     return datetime.utcnow().isoformat(timespec="milliseconds") + "Z"
+
 def normalize_angle(a):
     return (a + 180) % 360 - 180
+
 def shortest_angle_error(target, current):
     return (target - current + 180) % 360 - 180
+
 def clamp(v, vmin, vmax):
     return max(min(v, vmax), vmin)
+
 # ---------------- MOTOR LOW LEVEL ----------------
 def send(ser, cmd):
     ser.write((cmd + "\n").encode())
+
 def stop_all(ser):
     send(ser, "?stopall")
+
 def emergency_stop(ser):
-    global running, paused
-    print("\n🛑 ARRÊT D'URGENCE ACTIVÉ")
+    global running, paused, progress_val
+    print("🛑 ARRÊT D'URGENCE ACTIVÉ")
     running = False
     paused = False
+    progress_val = 0
     try:
         stop_all(ser)
     except:
         pass
+
 def handle_pause(ser, start_time_ref):
     global paused, running
     if paused and running:
         stop_all(ser)
-        print("\n|| SYSTÈME EN PAUSE ||")
+        print("|| SYSTÈME EN PAUSE ||")
         pause_start = time.time()
         while paused and running:
             time.sleep(0.1)
@@ -65,9 +91,11 @@ def handle_pause(ser, start_time_ref):
         print("▶ REPRISE")
         return start_time_ref + pause_duration
     return start_time_ref
+
 # ---------------- ACCEL ----------------
 def lsb_to_g(ax, ay, az):
     return ax / SENSITIVITY, ay / SENSITIVITY, az / SENSITIVITY
+
 def compute_angles(ax, ay, az):
     eps = 1e-12
     theta = math.degrees(math.atan2(ax, math.sqrt(ay * ay + az * az + eps)))
@@ -75,6 +103,7 @@ def compute_angles(ax, ay, az):
     theta = clamp(theta, -90, 90)
     psi = normalize_angle(psi)
     return theta, psi
+
 def parse_asc3(line):
     p = line.strip().split()
     if len(p) >= 5 and p[0] == "ASC3":
@@ -83,6 +112,7 @@ def parse_asc3(line):
         except:
             pass
     return None
+
 def accel_reader(sock):
     global latest_theta, latest_psi, latest_raw, latest_ts, running
     buf = ""
@@ -106,93 +136,123 @@ def accel_reader(sock):
                     latest_ts = now()
         except:
             pass
+
 # ---------------- MOTOR CONTROL ----------------
 def move_motor(target, get_angle, motor_id, name, amin, amax, ser):
     global running
     target = clamp(target, amin, amax)
     start = time.time()
     print(f"→ {name} cible : {target:+.1f}°")
+
     while running:
-        if not running:
-            stop_all(ser)
-            return False
+
         start = handle_pause(ser, start)
-        if not running:
-            stop_all(ser)
-            return False
+
         with accel_lock:
             current = get_angle()
+
         if current is None:
             time.sleep(CONTROL_PERIOD)
             continue
+
         current = normalize_angle(current)
         error = shortest_angle_error(target, current)
+
         if abs(error) < STOP_THRESHOLD:
             stop_all(ser)
             print(f"✓ {name} atteint")
             return True
+
         speed = clamp(KP * error, -MAX_SPEED, MAX_SPEED)
         if abs(speed) < MIN_SPEED:
             speed = math.copysign(MIN_SPEED, speed)
+
         send(ser, f"?m{motor_id}={int(speed)}")
+
         if time.time() - start > TIMEOUT:
             stop_all(ser)
             print(f"❌ Timeout {name}")
             return False
+
         time.sleep(CONTROL_PERIOD)
+
     stop_all(ser)
     return False
+
 # ---------------- SCAN ----------------
-def sweep_psi(theta_cmd, psi_positions, ser, dataset):
+def sweep_psi(theta_cmd, psi_positions, ser, dataset, progress_callback):
     global running
     for idx, psi_target in enumerate(psi_positions, 1):
         if not running:
             return False
+
         print(f"    → Psi {idx}/{len(psi_positions)} : {psi_target:+.1f}°")
-        if not move_motor(psi_target, lambda: latest_psi, 2,
-                          "Psi", -PSI_SAFE, PSI_SAFE, ser):
+
+        if not move_motor(psi_target, lambda: latest_psi, 2, "Psi", -PSI_SAFE, PSI_SAFE, ser):
             return False
+
         with accel_lock:
             if latest_raw:
                 ax, ay, az = latest_raw
                 norm = math.sqrt(sum((v / SENSITIVITY) ** 2 for v in latest_raw))
-                dataset.append([
-                    latest_ts,
-                    theta_cmd,
-                    latest_theta,
-                    latest_psi,
-                    ax, ay, az,
-                    norm
-                ])
+                dataset.append([latest_ts, theta_cmd, latest_theta, latest_psi, ax, ay, az, norm])
+
+        progress_callback()
+
     return True
+
 def run_sequence(config_path, ser):
-    global running
-    with open(config_path) as f:
-        sequence = json.load(f)["sequence"]
-    dataset = []
-    print("\n=== INIT (Psi 180°) ===")
-    if not move_motor(180, lambda: latest_psi, 2,
-                      "Psi", -PSI_SAFE, PSI_SAFE, ser):
+    global running, progress_val
+    progress_val = 0
+
+    try:
+        with open(config_path) as f:
+            sequence = json.load(f)["sequence"]
+    except Exception as e:
+        print(f"❌ Erreur lecture config: {e}")
         return
+
+    total_psi_points = sum(len(step.get("psi_positions", [])) for step in sequence)
+    points_done = 0
+
+    def update_progress():
+        nonlocal points_done
+        global progress_val
+        points_done += 1
+        if total_psi_points > 0:
+            progress_val = int((points_done / total_psi_points) * 100)
+
+    dataset = []
+
+    print("=== INITIALISATION (Psi 180°) ===")
+    if not move_motor(180, lambda: latest_psi, 2, "Psi", -PSI_SAFE, PSI_SAFE, ser):
+        return
+
     for step_idx, step in enumerate(sequence, 1):
         if not running:
             break
+
         theta_cmd = clamp(step["theta"], -THETA_SAFE, THETA_SAFE)
         psi_positions = step.get("psi_positions", [])
-        print(f"\n=== ÉTAPE {step_idx}/{len(sequence)} (Theta {theta_cmd}°) ===")
-        if not move_motor(theta_cmd, lambda: latest_theta, 1,
-                          "Theta", -THETA_SAFE, THETA_SAFE, ser):
+
+        print(f"\nÉTAPE {step_idx}/{len(sequence)} (Theta {theta_cmd}°)")
+
+        if not move_motor(theta_cmd, lambda: latest_theta, 1, "Theta", -THETA_SAFE, THETA_SAFE, ser):
             break
-        if not sweep_psi(theta_cmd, psi_positions, ser, dataset):
+
+        if not sweep_psi(theta_cmd, psi_positions, ser, dataset, update_progress):
             break
+
     if running:
-        print("\n=== FIN RÉUSSIE ===")
+        print("\n=== FIN DU SCAN RÉUSSIE ===")
+        progress_val = 100
         move_motor(0, lambda: latest_psi, 2, "Psi", -PSI_SAFE, PSI_SAFE, ser)
         move_motor(0, lambda: latest_theta, 1, "Theta", -THETA_SAFE, THETA_SAFE, ser)
+
     if dataset:
         fname = f"scan_{datetime.now().strftime('%H%M%S')}.csv"
         with open(fname, "w", newline="") as f:
             writer = csv.writer(f)
             writer.writerow(["time", "theta_cmd", "theta", "psi", "x", "y", "z", "norm"])
             writer.writerows(dataset)
-        print(f"Sauvegardé : {fname}")
+        print(f"💾 Fichier sauvegardé : {fname}")
