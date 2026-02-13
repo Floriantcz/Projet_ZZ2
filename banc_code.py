@@ -5,14 +5,53 @@ import math
 import socket
 import threading
 import time
+import os
 from datetime import datetime
 from typing import Optional, Tuple
 
-# ---------------- CONFIG ----------------
-HOST = "192.168.4.1"
-PORT = 3535
-SERIAL_PORT = "COM9"
-BAUDRATE = 115200
+# ---------------- CONFIG (chargé depuis settings.json) ----------------
+
+DEFAULT_SETTINGS = {
+    "network": {
+        "host": "192.168.4.1",
+        "port": 3535
+    },
+    "serial": {
+        "port": "COM9",
+        "baudrate": 115200
+    }
+}
+
+def load_settings():
+    if os.path.exists("settings.json"):
+        try:
+            with open("settings.json", "r") as f:
+                data = json.load(f)
+                print("✅ Paramètres chargés depuis settings.json")
+                return data
+        except Exception as e:
+            print(f"⚠ Erreur lecture settings.json : {e}")
+    print("⚠ Utilisation des paramètres par défaut.")
+    return DEFAULT_SETTINGS
+
+def save_settings(new_data):
+    try:
+        with open("settings.json", "w") as f:
+            json.dump(new_data, f, indent=4)
+        print("💾 settings.json mis à jour avec succès")
+        return True
+    except Exception as e:
+        print(f"❌ Erreur lors de la sauvegarde de settings.json : {e}")
+        return False
+
+settings = load_settings()
+
+HOST = settings.get("network", {}).get("host", DEFAULT_SETTINGS["network"]["host"])
+PORT = settings.get("network", {}).get("port", DEFAULT_SETTINGS["network"]["port"])
+SERIAL_PORT = settings.get("serial", {}).get("port", DEFAULT_SETTINGS["serial"]["port"])
+BAUDRATE = settings.get("serial", {}).get("baudrate", DEFAULT_SETTINGS["serial"]["baudrate"])
+
+# ---------------- CONSTANTES CONTROLE ----------------
 SENSITIVITY = 256000.0  # LSB / g
 KP = 2.5
 MAX_SPEED = 30
@@ -33,9 +72,9 @@ latest_ts: Optional[str] = None
 
 running = True
 paused = False
-progress_val = 0  # Progression en %
+progress_val = 0
 
-# ---------------- NEW PAUSE / RESUME ----------------
+# ---------------- PAUSE / RESUME ----------------
 def pause_system():
     global paused
     if not paused:
@@ -63,7 +102,11 @@ def clamp(v, vmin, vmax):
 
 # ---------------- MOTOR LOW LEVEL ----------------
 def send(ser, cmd):
-    ser.write((cmd + "\n").encode())
+    if ser is not None:
+        try:
+            ser.write((cmd + "\n").encode())
+        except:
+            pass
 
 def stop_all(ser):
     send(ser, "?stopall")
@@ -74,10 +117,7 @@ def emergency_stop(ser):
     running = False
     paused = False
     progress_val = 0
-    try:
-        stop_all(ser)
-    except:
-        pass
+    stop_all(ser)
 
 def handle_pause(ser, start_time_ref):
     global paused, running
@@ -115,11 +155,16 @@ def parse_asc3(line):
 
 def accel_reader(sock):
     global latest_theta, latest_psi, latest_raw, latest_ts, running
+    if sock is None:
+        print("⚠ AccelReader: Pas de socket, thread arrêté.")
+        return
+    
     buf = ""
     sock.settimeout(1)
     while running:
         try:
             data = sock.recv(4096).decode(errors="ignore")
+            if not data: break
             buf += data
             lines = buf.split("\n")
             buf = lines[-1]
@@ -140,14 +185,16 @@ def accel_reader(sock):
 # ---------------- MOTOR CONTROL ----------------
 def move_motor(target, get_angle, motor_id, name, amin, amax, ser):
     global running
+    if ser is None:
+        print(f"❌ Erreur: Impossible de bouger {name}, port série non connecté.")
+        return False
+
     target = clamp(target, amin, amax)
     start = time.time()
     print(f"→ {name} cible : {target:+.1f}°")
 
     while running:
-
         start = handle_pause(ser, start)
-
         with accel_lock:
             current = get_angle()
 
@@ -185,26 +232,20 @@ def sweep_psi(theta_cmd, psi_positions, ser, dataset, progress_callback):
     for idx, psi_target in enumerate(psi_positions, 1):
         if not running:
             return False
-
         print(f"    → Psi {idx}/{len(psi_positions)} : {psi_target:+.1f}°")
-
         if not move_motor(psi_target, lambda: latest_psi, 2, "Psi", -PSI_SAFE, PSI_SAFE, ser):
             return False
-
         with accel_lock:
             if latest_raw:
                 ax, ay, az = latest_raw
                 norm = math.sqrt(sum((v / SENSITIVITY) ** 2 for v in latest_raw))
                 dataset.append([latest_ts, theta_cmd, latest_theta, latest_psi, ax, ay, az, norm])
-
         progress_callback()
-
     return True
 
 def run_sequence(config_path, ser):
     global running, progress_val
     progress_val = 0
-
     try:
         with open(config_path) as f:
             sequence = json.load(f)["sequence"]
@@ -223,7 +264,6 @@ def run_sequence(config_path, ser):
             progress_val = int((points_done / total_psi_points) * 100)
 
     dataset = []
-
     print("=== INITIALISATION (Psi 180°) ===")
     if not move_motor(180, lambda: latest_psi, 2, "Psi", -PSI_SAFE, PSI_SAFE, ser):
         return
@@ -231,15 +271,11 @@ def run_sequence(config_path, ser):
     for step_idx, step in enumerate(sequence, 1):
         if not running:
             break
-
         theta_cmd = clamp(step["theta"], -THETA_SAFE, THETA_SAFE)
         psi_positions = step.get("psi_positions", [])
-
         print(f"\nÉTAPE {step_idx}/{len(sequence)} (Theta {theta_cmd}°)")
-
         if not move_motor(theta_cmd, lambda: latest_theta, 1, "Theta", -THETA_SAFE, THETA_SAFE, ser):
             break
-
         if not sweep_psi(theta_cmd, psi_positions, ser, dataset, update_progress):
             break
 
