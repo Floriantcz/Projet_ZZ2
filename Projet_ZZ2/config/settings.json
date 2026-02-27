@@ -1,7 +1,12 @@
 {
+    "transport": "tcp",
     "network": {
         "host": "192.168.4.1",
         "port": 3535
+    },
+    "usb": {
+        "port": "COM9",
+        "baudrate": 115200
     },
     "serial": {
         "port": "COM9",

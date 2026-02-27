@@ -1,13 +1,13 @@
-"""UI helpers for the refactored application.
+"""Aides d'interface utilisateur pour l'application refactorée.
 
-The GUI code from ``gui.py`` has been split into smaller pieces
-contained in ``widgets.py`` and ``helpers.py``.  This package is
-intended to demonstrate how a PyQt/PyQtGraph application can be built
-in a modular fashion; the original ``gui.py`` file is left untouched in
-the parent directory for legacy purposes.
+Le code GUI de ``gui.py`` a été découpé en morceaux plus petits
+contenus dans ``widgets.py`` et ``helpers.py``. Ce paquet sert à
+montrer comment une application PyQt/PyQtGraph peut être construite
+de manière modulaire ; l'ancien fichier ``gui.py`` reste inchangé dans
+le dossier parent pour des raisons de compatibilité.
 """
 
-# re-export common names for convenience
+# re-exporte des noms courants pour la commodité
 from .widgets import OutLog, GimbalWidget3D, STYLE_SHEET
 from .helpers import (
     create_section_title,

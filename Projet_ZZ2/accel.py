@@ -1,9 +1,9 @@
-"""Accelerometer processing utilities.
+"""Utilitaires de traitement de l'accéléromètre.
 
-Functions which convert raw ASC3 strings from the hardware into
-physical units, compute angles, and maintain the reader thread live
-values.  This logic was originally embedded in ``banc_code`` and is
-now isolated.
+Fonctions qui convertissent les chaînes ASC3 brutes provenant du
+matériel en unités physiques, calculent les angles et mettent à jour
+les valeurs en direct du thread de lecture. Cette logique était au
+départ embarquée dans ``banc_code`` et est maintenant isolée.
 """
 
 import math
@@ -40,10 +40,11 @@ def compute_angles(ax: float, ay: float, az: float):
 
 
 def parse_asc3(line: str) -> Optional[tuple]:
-    """Handle a single line received from the accelerometer socket.
+    """Traite une seule ligne reçue depuis la socket de
+    l'accéléromètre.
 
-    The expected format is ``ASC3 <ignored> ax ay az``.  Returns ``None``
-    if the line was not parsable.
+    Le format attendu est ``ASC3 <ignored> ax ay az``. Retourne ``None`` si
+    la ligne n'était pas analysable.
     """
     parts = line.strip().split()
     if len(parts) >= 5 and parts[0] == "ASC3":
@@ -55,11 +56,12 @@ def parse_asc3(line: str) -> Optional[tuple]:
 
 
 def accel_reader(sock: socket.socket):
-    """Background thread function which reads data from ``sock``.
+    """Fonction de thread en arrière-plan qui lit des données depuis
+    ``sock``.
 
-    The global variables in :mod:`state` are updated via the shared
-    lock so that other parts of the program can safely read the most
-    recent sample.
+    Les variables globales du module :mod:`state` sont mises à jour via
+    le verrou partagé afin que d'autres parties du programme puissent
+    lire en toute sécurité l'échantillon le plus récent.
     """
     if sock is None:
         print("⚠ AccelReader: Pas de socket, thread arrêté.")
@@ -91,4 +93,37 @@ def accel_reader(sock: socket.socket):
             pass
         
         # small sleep avoids busy‑wait and reduces CPU usage
+        time.sleep(0.001)
+
+
+def accel_reader_serial(ser):
+    """Lit les lignes de l'accéléromètre depuis un port série/USB.
+
+    L'implémentation reflète celle de :func:`accel_reader` mais consomme
+    les données depuis une interface série plutôt qu'une socket TCP. Cela
+    est utilisé lorsque l'utilisateur choisit ``transport = 'usb'`` dans la
+    configuration.
+    """
+    if ser is None:
+        print("⚠ AccelReader USB: port série non connecté, thread arrêté.")
+        return
+
+    while state.running:
+        try:
+            # read a full line (blocks up to ``timeout`` on the serial port)
+            line = ser.readline().decode(errors="ignore")
+            if not line:
+                continue
+            r = parse_asc3(line)
+            if not r:
+                continue
+            ax_g, ay_g, az_g = lsb_to_g(*r)
+            theta, psi = compute_angles(ax_g, ay_g, az_g)
+            with state.accel_lock:
+                state.latest_theta = theta
+                state.latest_psi = psi
+                state.latest_raw = r
+                state.latest_ts = utils.now()
+        except Exception:
+            pass
         time.sleep(0.001)

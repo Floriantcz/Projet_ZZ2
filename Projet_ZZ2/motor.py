@@ -1,9 +1,9 @@
-"""Motor command abstractions and bench initialization.
+"""Abstractions de commandes moteurs et initialisation du banc.
 
-The low‑level serial protocol is wrapped here so that higher layers can
-simply call ``move_motor`` with a target angle and a callable to read
-back the current position.  Emergency stop logic and pause handling
-live in this module as well.
+Le protocole série bas niveau est encapsulé ici afin que les couches
+supérieures puissent simplement appeler ``move_motor`` avec un angle
+cible et une fonction retournant la position actuelle. La logique
+d'arrêt d'urgence et de pause se trouvent également dans ce module.
 """
 
 import math
@@ -12,7 +12,7 @@ from typing import Callable, Optional
 
 from . import state, utils
 
-# default PID constants (extracted from original banc_code)
+# constantes PID par défaut (extraites de l'ancien banc_code)
 KP = 2.5
 MAX_SPEED = 30
 MIN_SPEED = 15
@@ -24,7 +24,7 @@ PSI_SAFE = 179.0
 
 
 def send(ser, cmd: str):
-    """Write a command string to the serial port if available."""
+    """Écrit une chaîne de commande sur le port série si disponible."""
     if ser is not None:
         try:
             ser.write((cmd + "\n").encode())
@@ -34,15 +34,16 @@ def send(ser, cmd: str):
 
 
 def stop_all(ser):
-    """Immediately stop both motors."""
+    """Arrête immédiatement les deux moteurs."""
     send(ser, "?stopall")
 
 
 def emergency_stop(ser):
-    """Trigger an immediate shutdown of motion and reset progress.
+    """Déclenche un arrêt immédiat des mouvements et remet la
+    progression à zéro.
 
-    This mirrors ``banc_code.emergency_stop`` but lives in the
-    refactored package.
+    Cela reflète ``banc_code.emergency_stop`` mais vit dans le paquet
+    refactoré.
     """
     global KP, MAX_SPEED
     print("🛑 ARRÊT D'URGENCE ACTIVÉ")
@@ -53,12 +54,12 @@ def emergency_stop(ser):
 
 
 def handle_pause(ser, start_time_ref):
-    """Internal helper used by :func:`move_motor`.
+    """Helper interne utilisé par :func:`move_motor`.
 
-    If the system is paused this function will block until it is
-    resumed, stopping the motors in the meantime.  The return value is
-    an updated timestamp to compensate for the time spent paused, which
-    keeps progress calculations correct.
+    Si le système est en pause, cette fonction bloquera jusqu'à ce
+    qu'il reprenne, en arrêtant les moteurs pendant ce temps. La valeur
+    renvoyée est un horodatage ajusté pour compenser la durée de pause,
+    ce qui maintient les calculs de progression corrects.
     """
     if state.paused and state.running:
         stop_all(ser)
@@ -81,28 +82,28 @@ def move_motor(
     amax: float,
     ser
 ) -> bool:
-    """Move a single motor until a desired angle is reached.
+    """Bouge un moteur unique jusqu'à l'angle souhaité.
 
-    Parameters
+    Paramètres
     ----------
     target : float
-        Desired angle in degrees.
+        Angle désiré en degrés.
     get_angle : callable
-        Function returning the *current* value of the controlled angle.
+        Fonction retournant la valeur *actuelle* de l'angle contrôlé.
     motor_id : int
-        Identifier sent on the serial bus (1 for theta, 2 for psi).
+        Identifiant envoyé sur le bus série (1 pour theta, 2 pour psi).
     name : str
-        Human-readable name used in debug prints.
+        Nom convivial utilisé dans les messages de debug.
     amin, amax : float
-        Safety limits for the commanded angle.
+        Limites de sécurité pour l'angle demandé.
     ser
-        Serial port object, or ``None`` if not connected.
+        Objet port série, ou ``None`` si non connecté.
 
-    Returns
-    -------
+    Retour
+    ------
     bool
-        ``True`` if the motor reached the target before a timeout or
-        ``False`` if the operation was aborted or failed.
+        ``True`` si le moteur atteint la cible avant un timeout, sinon
+        ``False`` si l'opération est abandonnée ou échoue.
     """
     if ser is None:
         print(f"❌ Erreur: Impossible de bouger {name}, port série non connecté.")
@@ -147,15 +148,16 @@ def move_motor(
 
 
 def init_bench_home(ser) -> bool:
-    """Bring the bench to its home orientation (0°,0°).
+    """Ramène le banc à son orientation initiale (0°,0°).
 
-    This is executed on GUI startup in the original program.  The
-    sequence is:
+    Cela est exécuté au démarrage de l'interface dans le programme
+    original. La séquence est :
 
-    1. Move psi to 0°
-    2. Move theta to 0°
+    1. Déplacer Psi à 0°
+    2. Déplacer Theta à 0°
 
-    Each step aborts if the corresponding motor cannot reach the target.
+    Chaque étape est interrompue si le moteur correspondant ne peut
+    atteindre la cible.
     """
     if ser is None:
         return False

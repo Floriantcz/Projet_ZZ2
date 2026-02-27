@@ -1,26 +1,28 @@
-"""Utility functions to build common GUI elements.
+"""Fonctions utilitaires pour construire des éléments GUI communs.
 
-These helpers were extracted from the large ``MainWindow`` class in
-``gui.py``.  They allow individual pieces of the window to be created
-in isolation and tested or reused more easily.
+Ces helpers ont été extraits de la grande classe ``MainWindow`` de
+``gui.py``. Ils permettent de créer des parties individuelles de la
+fenêtre de manière isolée et de les tester ou réutiliser plus
+i facilement.
 """
 
 from PyQt5 import QtWidgets, QtCore
 
 
 def create_section_title(text: str) -> QtWidgets.QLabel:
-    """Return a stylised section header label."""
+    """Retourne un label d'entête de section stylisé."""
     lbl = QtWidgets.QLabel(text)
     lbl.setObjectName("Title")
     return lbl
 
 
 def create_labeled_widget(label_text: str, widget: QtWidgets.QWidget) -> QtWidgets.QWidget:
-    """Wrap ``widget`` with a small label above it.
+    """Encadre ``widget`` d'une petite étiquette au-dessus.
 
-    The original method in ``gui.py`` built a composite widget with a
-    vertical layout.  We reuse the same look here so that the rest of
-    the user interface can remain visually consistent.
+    La méthode originale dans ``gui.py`` construisait un widget
+    composite avec un layout vertical. Nous réutilisons le même aspect
+    ici afin que le reste de l'interface reste visuellement
+    cohérent.
     """
     c = QtWidgets.QVBoxLayout()
     lbl = QtWidgets.QLabel(label_text)
@@ -34,10 +36,11 @@ def create_labeled_widget(label_text: str, widget: QtWidgets.QWidget) -> QtWidge
 
 
 def create_collapsible_section(title: str, content_widget: QtWidgets.QWidget, expanded: bool = True) -> QtWidgets.QWidget:
-    """Return a widget whose ``content_widget`` can be shown/hidden.
+    """Retourne un widget dont le ``content_widget`` peut être
+    affiché/masqué.
 
-    This corresponds to the accordion-style sections seen in the side
-    panel of the control tab.
+    Cela correspond aux sections en accordéon vues dans le panneau
+    latéral de l'onglet de contrôle.
     """
     wrapper = QtWidgets.QWidget()
     v = QtWidgets.QVBoxLayout(wrapper)
@@ -67,10 +70,10 @@ def create_collapsible_section(title: str, content_widget: QtWidgets.QWidget, ex
 
 
 def create_slider(min_v: int, max_v: int, current_v: int, callback) -> QtWidgets.QSlider:
-    """Build a horizontal slider with range and callback.
+    """Construit un curseur horizontal avec une plage et un callback.
 
-    ``callback`` will be invoked with the new integer value whenever the
-    slider moves.
+    ``callback`` sera invoqué avec la nouvelle valeur entière à chaque
+    mouvement du curseur.
     """
     s = QtWidgets.QSlider(QtCore.Qt.Horizontal)
     s.setMinimum(min_v)

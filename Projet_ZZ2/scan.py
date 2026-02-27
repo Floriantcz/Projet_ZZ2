@@ -1,9 +1,10 @@
-"""Sequence scanning and data acquisition helpers.
+"""Aides pour le balayage de séquences et l'acquisition de données.
 
-This module contains the logic previously located in the latter half of
-``banc_code.py``.  The functions are parameterised so that callers can
-supply their own progress callbacks or serial port objects; they do not
-rely on globals except for the shared ``state`` module.
+Ce module contient la logique précédemment située dans la seconde moitié
+de ``banc_code.py``. Les fonctions sont paramétrées de sorte que les
+appelants puissent fournir leurs propres callbacks de progression ou
+objets port série ; elles ne dépendent pas de globals hormis le module
+partagé ``state``.
 """
 
 import csv
@@ -17,11 +18,11 @@ from . import state, motor, utils, accel
 
 
 def take_static_measures(dataset: List[List], theta_cmd: float, samples: int = 10):
-    """Collect ``samples`` individual readings at fixed angles.
+    """Collecte ``samples`` mesures individuelles à angles fixes.
 
-    The measurements are appended to ``dataset`` in the same format as
-    the original code.  ``theta_cmd`` is the commanded theta value
-    corresponding to the current position of the motors.
+    Les mesures sont ajoutées à ``dataset`` dans le même format que
+    dans le code original. ``theta_cmd`` est la valeur de theta commandée
+    correspondant à la position actuelle des moteurs.
     """
     measures_taken = 0
     old_ts = None
@@ -48,10 +49,11 @@ def take_static_measures(dataset: List[List], theta_cmd: float, samples: int = 1
 
 
 def take_static_measures_average(dataset: List[List], theta_cmd: float, samples: int = 10):
-    """Same as :func:`take_static_measures` but averages each batch.
+    """Identique à :func:`take_static_measures` mais effectue une
+    moyenne pour chaque lot.
 
-    Reduces noise in the recorded values; this is the "average" mode
-    from the GUI.
+    Réduit le bruit des valeurs enregistrées ; c'est le mode
+    "average" de l'interface graphique.
     """
     measures_taken = 0
     old_ts = None
@@ -88,11 +90,12 @@ def take_static_measures_average(dataset: List[List], theta_cmd: float, samples:
 def sweep_psi(theta_cmd: float, psi_positions: List[float], ser, dataset: List[List],
               acquisition_mode: str = "average",
               progress_callback=None) -> bool:
-    """Move the psi motor through a set of positions and record data.
+    """Fait parcourir au moteur psi une série de positions et enregistre
+    les données.
 
-    This helper is used by :func:`run_sequence` and is parameterised with
-    ``acquisition_mode`` and ``progress_callback`` so that it can be
-    re‑used in different contexts (CLI tool, GUI, tests...).
+    Cet helper est utilisé par :func:`run_sequence` et est paramétré avec
+    ``acquisition_mode`` et ``progress_callback`` afin qu'il puisse être
+    réutilisé dans différents contextes (outil CLI, GUI, tests...).
     """
     global running
 
@@ -121,11 +124,11 @@ def sweep_psi(theta_cmd: float, psi_positions: List[float], ser, dataset: List[L
 
 def run_sequence(config_path: str, ser, acquisition_mode: str = "average",
                  progress_callback=None):
-    """Execute a full scan sequence described by a JSON file.
+    """Exécute une séquence de scan complète décrite par un fichier JSON.
 
-    The behaviour mirrors ``banc_code.run_sequence`` but is now a small
-    standalone function that can be imported by both GUI and
-    non‑GUI clients.
+    Le comportement reflète ``banc_code.run_sequence`` mais il s'agit
+    désormais d'une petite fonction autonome qui peut être importée par
+    des clients GUI ou non-GUI.
     """
     state.progress_val = 0
 

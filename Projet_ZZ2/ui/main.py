@@ -1,22 +1,23 @@
-"""Entry point and high‑level GUI class using the refactored modules.
+"""Point d'entrée et classe principale de l'interface
+graphique reposant sur les modules refactorisés.
 
-This file is **new** and does not exist in the original workspace.  It
-shows how a PyQt application can be built by composing small logical
-pieces from the ``Projet_ZZ2`` package rather than stuffing everything
-into a single monolithic script.
+Ce fichier est **nouveau** et n'existait pas dans le workspace
+initial. Il montre comment une application PyQt peut être construite en
+assemblant des morceaux logiques du paquet ``Projet_ZZ2`` plutôt qu'en
+entassant tout dans un script monolithique.
 
-To launch the refactored interface run::
+Pour lancer l'interface refactorée ::
 
     python -m Projet_ZZ2.ui.main
 
-By default the application connects to the accelerometer over TCP, but a
-USB option is now available.  Choose the transport in the Settings tab and
-provide a serial port and baudrate if using USB.
+Par défaut, l'application se connecte à l'accéléromètre via TCP, mais une
+option USB est désormais disponible. Choisissez le transport dans l'onglet
+Settings et indiquez un port série et un baudrate si vous utilisez USB.
 
-The behaviour is intentionally very similar to the original
-``gui.py``; its methods call into the modules defined elsewhere in this
-package (`accel`, `motor`, `scan`, etc.) instead of relying on globals
-and large chunks of inline code.
+Le comportement reste volontairement très proche de l'ancien
+``gui.py`` ; ses méthodes délèguent aux modules du paquet
+(`accel`, `motor`, `scan`, etc.) au lieu de s'appuyer sur des
+variables globales et de gros blocs de code inline.
 """
 
 import sys
@@ -29,8 +30,9 @@ from threading import Thread
 
 import numpy as np
 
-# determine package root and configuration directory so that
-# JSON files can be loaded regardless of the current working directory
+# déterminer la racine du paquet et le dossier de configuration
+# pour que les fichiers JSON puissent être ouverts quel que soit
+# le répertoire de travail actuel
 PACKAGE_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 CONFIG_DIR = os.path.join(PACKAGE_ROOT, "config")
 
@@ -41,7 +43,7 @@ def config_path(filename: str) -> str:
 from PyQt5 import QtWidgets, QtCore, QtGui
 import pyqtgraph as pg
 
-# import the new modular building blocks
+# importer les nouvelles briques modulaires
 from .. import config as cfg
 from .. import state, accel, motor, scan, utils
 from .widgets import OutLog, GimbalWidget3D, STYLE_SHEET
@@ -64,7 +66,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.resize(1600, 950)
         self.setStyleSheet(STYLE_SHEET)
 
-        # buffers used for live plotting
+        # tampons utilisés pour le tracé en temps réel
         self.time_data, self.theta_data, self.psi_data = [], [], []
         self.start_time = time.time()
 
@@ -74,11 +76,12 @@ class MainWindow(QtWidgets.QMainWindow):
         container_global.setLayout(layout_global)
         self.setCentralWidget(container_global)
 
-        # notebook
+        # zone d'onglets (notebook)
         self.tabs = QtWidgets.QTabWidget()
         layout_global.addWidget(self.tabs, stretch=4)
 
-        # console and actions panel (reused from previous implementation)
+        # panneau console et actions (réutilisé de l'implémentation
+        # précédente)
         console_container = QtWidgets.QHBoxLayout()
         console_frame = QtWidgets.QFrame()
         console_frame.setObjectName("ControlPanel")
@@ -126,35 +129,35 @@ class MainWindow(QtWidgets.QMainWindow):
 
         sys.stdout = OutLog(self.console_log, sys.stdout)
 
-        # assemble each tab using helper methods below
+        # assembler chaque onglet en utilisant les helpers ci-dessous
         self.init_control_tab()
         self.init_editor_tab()
         self.init_calibration_tab()
         self.init_settings_tab()
 
-        # hardware connections
+        # connexions matérielles
         if not self.sock or not self.ser:
             print("⚠ ATTENTION : Certaines connexions ont échoué. Vérifiez l'onglet SETTINGS.")
         else:
             Thread(target=motor.init_bench_home, args=(self.ser,), daemon=True).start()
 
-        # periodic UI update
+        # mise à jour périodique de l'interface
         self.timer = QtCore.QTimer()
         self.timer.timeout.connect(self.update_ui)
         self.timer.start(50)
 
-    # the following methods are essentially a trimmed copy of the
-    # corresponding functions in the original ``gui.py``; they are kept
-    # here for completeness but they delegate operational work to the
-    # new modules (``scan.run_sequence`` etc.).  For brevity comments are
-    # omitted but the original implementation can be consulted in the
-    # legacy file.
+    # les méthodes qui suivent sont essentiellement une version allégée
+    # des fonctions équivalentes de l'ancien ``gui.py`` ; elles sont
+    # conservées ici pour la complétude mais délèguent le travail opérationnel
+    # aux nouveaux modules (``scan.run_sequence`` etc.). Pour faire court
+    # les commentaires ont été omis, mais l'implémentation originale reste
+    # consultable dans le fichier d'héritage.
 
     def init_control_tab(self):
         control_widget = QtWidgets.QWidget()
         main_layout = QtWidgets.QHBoxLayout(control_widget)
 
-        # left side: plots + 3D visualization
+        # côté gauche : graphiques + visualisation 3D
         graph_side = QtWidgets.QVBoxLayout()
         header_layout = QtWidgets.QHBoxLayout()
         header_layout.setSpacing(20)
@@ -296,7 +299,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tabs.addTab(control_widget, "📊 LIVE MONITORING")
 
     def init_editor_tab(self):
-        # similar to original; omitted readability
+        # similaire à l'original ; commentaires supprimés pour la lisibilité
         editor_widget = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(editor_widget)
         layout.addWidget(create_section_title("Éditeur de Configuration Personnalisée"))
@@ -360,9 +363,9 @@ class MainWindow(QtWidgets.QMainWindow):
         form_frame.setObjectName("ControlPanel")
         form = QtWidgets.QFormLayout(form_frame)
         form.setSpacing(15)
-        # read current network/serial settings directly from the
-        # shared configuration module; there is no need to import the
-        # legacy ``banc_code`` script anymore.
+        # lire les réglages réseau/série courants depuis le module de
+        # configuration partagé ; il n'est plus nécessaire d'importer
+        # l'ancien script ``banc_code``.
         settings = cfg.load_settings()
         # network parameters
         self.edit_host = QtWidgets.QLineEdit(str(settings['network']['host']))
@@ -374,7 +377,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.edit_serial = QtWidgets.QLineEdit(str(settings['serial']['port']))
         self.edit_baud = QtWidgets.QLineEdit(str(settings['serial']['baudrate']))
 
-        # transport selection (tcp or usb)
+        # sélection du transport (tcp ou usb)
         self.combo_transport = QtWidgets.QComboBox()
         self.combo_transport.addItems(["tcp", "usb"])
         current_transport = settings.get('transport', 'tcp')
@@ -393,7 +396,8 @@ class MainWindow(QtWidgets.QMainWindow):
         form.addRow("Port COM :", self.edit_serial)
         form.addRow("Baudrate :", self.edit_baud)
 
-        # hook to toggle fields when transport changes
+        # liaison pour basculer la visibilité des champs quand le transport
+        # change
         self.combo_transport.currentTextChanged.connect(self._on_transport_changed)
         # initialize visibility state
         self._on_transport_changed(self.combo_transport.currentText())
@@ -407,9 +411,9 @@ class MainWindow(QtWidgets.QMainWindow):
         layout.addWidget(QtWidgets.QLabel("L'application redémarrera automatiquement pour appliquer les changements."))
         self.tabs.addTab(settings_widget, "⚙️ SETTINGS")
 
-    # utility / callback methods follow below; these mostly replicate the
-    # behaviour of the original but again delegate to the new package
-    # where possible.
+    # les méthodes utilitaires / callbacks suivent ; elles reproduisent
+    # en grande partie le comportement de l'ancien code tout en
+    # déléguant autant que possible au nouveau paquet.
 
     def create_section_title(self, text):
         return create_section_title(text)

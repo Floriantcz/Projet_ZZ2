@@ -1,7 +1,7 @@
-"""Custom Qt widgets used by the modular GUI.
+"""Widgets Qt personnalisés utilisés par l'interface modulaire.
 
-This file holds the 3‑D gimbal widget, a standard console redirection
-class, and the global stylesheet string.
+Ce fichier contient le widget gimbal 3D, une classe de redirection
+standard de console et la chaîne de feuille de style globale.
 """
 
 import numpy as np
@@ -45,10 +45,12 @@ QLineEdit, QDoubleSpinBox, QComboBox { background-color: #2D2D2D; color: white; 
 
 
 class OutLog:
-    """Redirect ``print()`` output into a QTextEdit with colour coding.
+    """Redirige la sortie de ``print()`` vers un QTextEdit avec
+    colorisation.
 
-    The copy in the original ``gui.py`` was monolithic; here it is
-    documented and could be reused by any widget that needs a console.
+    La version originale dans ``gui.py`` était monolithique ; ici elle
+    est documentée et peut être réutilisée par n'importe quel widget qui
+    a besoin d'une console.
     """
 
     def __init__(self, edit: QtWidgets.QTextEdit, out=None, color=None):
@@ -107,10 +109,10 @@ def _create_box(w, h, d, color):
 
 
 class GimbalWidget3D(gl.GLViewWidget):
-    """3‑D visualization of the two‑axis gimbal.
+    """Visualisation 3D du cardan à deux axes.
 
-    The original geometry creation code lives here; the set_angles method
-    is the only public API needed by the rest of the GUI.
+    Le code de création de la géométrie original se trouve ici ; la méthode
+    set_angles est la seule API publique nécessaire pour le reste de la GUI.
     """
 
     def __init__(self, parent=None):
@@ -163,9 +165,10 @@ class GimbalWidget3D(gl.GLViewWidget):
         plate.setParentItem(self.plateau_root)
 
     def set_angles(self, theta: float, psi: float):
-        """Update the orientation of the gimbal.
+        """Met à jour l'orientation du cardan.
 
-        ``theta`` rotates the outer frame, ``psi`` tilts the inner plate.
+        ``theta`` fait tourner le cadre extérieur, ``psi`` incline la
+        plaque intérieure.
         """
         self.cadre_root.resetTransform()
         self.cadre_root.translate(0, 1.6, 0)

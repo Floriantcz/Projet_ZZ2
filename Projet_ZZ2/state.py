@@ -1,10 +1,10 @@
-"""Shared mutable state and flow-control flags.
+"""État mutable partagé et drapeaux de contrôle de flux.
 
-The original ``banc_code`` module used a collection of global
-variables (`running`, `paused`, `latest_theta`, etc.).  In the
-refactored code these still live here but they are documented and
-accessed through helper functions so that it is clearer where the
-important pieces of state are.
+Le module original ``banc_code`` utilisait un ensemble de variables
+globale (`running`, `paused`, `latest_theta`, etc.). Dans le code
+refactoré elles résident toujours ici mais sont documentées et
+accessibles via des fonctions utilitaires afin de clarifier où se
+trouvent les éléments d'état importants.
 """
 
 import threading
@@ -28,8 +28,8 @@ progress_val = 0
 
 
 def pause_system():
-    """Mark the application as paused; controllers will stop sending
-    commands until ``resume_system`` is called.
+    """Marque l'application comme en pause ; les contrôleurs cesseront
+d'envoyer des commandes tant que ``resume_system`` n'est pas appelé.
     """
     global paused
     if not paused:
@@ -38,7 +38,7 @@ def pause_system():
 
 
 def resume_system():
-    """Remove the pause flag so that actions may continue."""
+    """Supprime le drapeau de pause pour permettre la reprise des actions."""
     global paused
     if paused:
         paused = False

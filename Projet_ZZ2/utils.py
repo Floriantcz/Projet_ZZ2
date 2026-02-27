@@ -1,44 +1,44 @@
-"""General-purpose helper functions.
+"""Fonctions utilitaires générales.
 
-This module collects small utilities that are used by several other
-parts of the application (angle arithmetic, clamping, timestamp
-formatting, etc.).
+Ce module regroupe de petites fonctions utilisées par plusieurs autres
+parties de l'application (arithmétique d'angles, limitation, formatage
+de timestamp, etc.).
 """
 
 from datetime import datetime
 
 
 def now():
-    """Return a UTC timestamp string with millisecond precision.
+    """Retourne un timestamp UTC avec une précision milliseconde.
 
-    The format matches the behaviour of :func:`banc_code.now` in the
-    original code.
+    Le format est identique à celui de la fonction ``banc_code.now``
+    dans le code original.
     """
     return datetime.utcnow().isoformat(timespec="milliseconds") + "Z"
 
 
 def normalize_angle(angle):
-    """Wrap an angle into the range ``[-180, 180)``.
+    """Ramène un angle dans l'intervalle ``[-180, 180)``.
 
-    The result is equivalent to the original formula used in
+    Le résultat est équivalent à la formule originale utilisée dans
     ``banc_code.normalize_angle``.
     """
     return (angle + 180) % 360 - 180
 
 
 def shortest_angle_error(target, current):
-    """Compute the signed minimal difference from ``current`` to
-    ``target`` (also normalized to ``[-180,180)``).
+    """Calcule la différence signée minimale entre ``current`` et
+    ``target`` (également normalisée dans ``[-180,180)``).
 
-    Useful for PID loops when angles wrap around.
+    Utile pour les boucles PID lorsque les angles se recouvrent.
     """
     return (target - current + 180) % 360 - 180
 
 
 def clamp(value, minimum, maximum):
-    """Restrict ``value`` to the closed interval ``[minimum, maximum]``.
+    """Limite ``value`` à l'intervalle fermé ``[minimum, maximum]``.
 
-    This helper makes intent clearer and reduces repeated use of
-    `min(max(...))` throughout the codebase.
+    Cet utilitaire rend l'intention plus claire et évite les répétitions
+    de `min(max(...))` dans le code.
     """
     return max(min(value, maximum), minimum)
