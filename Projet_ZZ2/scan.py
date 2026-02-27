@@ -97,20 +97,29 @@ def sweep_psi(theta_cmd: float, psi_positions: List[float], ser, dataset: List[L
     ``acquisition_mode`` et ``progress_callback`` afin qu'il puisse être
     réutilisé dans différents contextes (outil CLI, GUI, tests...).
     """
-    global running
+    # Si aucune position Psi à scanner, retourner succès immédiatement
+    if not psi_positions:
+        print(f"    → Aucune position Psi à scanner pour theta={theta_cmd}° (liste vide)")
+        return True
 
+    print(f"    🔍 DEBUG: Début balayage Psi - {len(psi_positions)} positions à parcourir")
+    
     for idx, psi_target in enumerate(psi_positions, 1):
         if not state.running:
+            print(f"    ⚠ Balayage Psi interrompu à la position {idx}/{len(psi_positions)}")
             return False
 
         print(f"    → Psi {idx}/{len(psi_positions)} : {psi_target:+.1f}°")
 
         if not motor.move_motor(psi_target, lambda: state.latest_psi, 2, "Psi",
                                 -motor.PSI_SAFE, motor.PSI_SAFE, ser):
+            print(f"    ❌ Échec du mouvement Psi vers {psi_target}°")
             return False
 
+        print(f"    ⏱ Attente stabilisation ({motor.SETTLE_TIME}s)...")
         time.sleep(motor.SETTLE_TIME)
 
+        print(f"    📊 Acquisition de 10 mesures (mode: {acquisition_mode})...")
         if acquisition_mode == "raw":
             take_static_measures(dataset, theta_cmd, samples=10)
         else:
@@ -118,7 +127,10 @@ def sweep_psi(theta_cmd: float, psi_positions: List[float], ser, dataset: List[L
 
         if progress_callback:
             progress_callback()
+        
+        print(f"    ✓ Position Psi {idx}/{len(psi_positions)} terminée")
 
+    print(f"    ✅ Balayage Psi complet ({len(psi_positions)} positions)")
     return True
 
 
@@ -130,59 +142,77 @@ def run_sequence(config_path: str, ser, acquisition_mode: str = "average",
     désormais d'une petite fonction autonome qui peut être importée par
     des clients GUI ou non-GUI.
     """
-    state.progress_val = 0
-
     try:
-        with open(config_path) as f:
-            sequence = json.load(f)["sequence"]
+        print(f"🔍 DEBUG: run_sequence démarrée, state.running={state.running}")
+        state.progress_val = 0
+
+        try:
+            with open(config_path) as f:
+                sequence = json.load(f)["sequence"]
+            print(f"✅ Configuration chargée: {len(sequence)} étapes")
+        except Exception as e:
+            print(f"❌ Erreur lecture config: {e}")
+            return
+
+        dataset = []
+        total_psi_points = sum(len(step.get("psi_positions", [])) for step in sequence)
+        points_done = 0
+        print(f"📊 Total de points Psi à parcourir: {total_psi_points}")
+
+        def _update_progress():
+            nonlocal points_done
+            points_done += 1
+            if total_psi_points > 0:
+                state.progress_val = int((points_done / total_psi_points) * 100)
+            if progress_callback:
+                progress_callback(state.progress_val)
+
+        print(f"=== INITIALISATION (Psi 180°) === (state.running={state.running})")
+        if not motor.move_motor(180, lambda: state.latest_psi, 2, "Psi",
+                                -motor.PSI_SAFE, motor.PSI_SAFE, ser):
+            print("❌ Échec de l'initialisation à 180°")
+            return
+
+        print(f"✅ Initialisation réussie, début de la séquence... (state.running={state.running})")
+
+        for step_idx, step in enumerate(sequence, 1):
+            print(f"🔍 DEBUG: Début étape {step_idx}, state.running={state.running}")
+            if not state.running:
+                print("⚠ Séquence interrompue par l'utilisateur")
+                break
+            theta_cmd = utils.clamp(step["theta"], -motor.THETA_SAFE, motor.THETA_SAFE)
+            psi_positions = step.get("psi_positions", [])
+            print(f"\nÉTAPE {step_idx}/{len(sequence)} (Theta {theta_cmd}°, {len(psi_positions)} positions Psi)")
+            
+            if not motor.move_motor(theta_cmd, lambda: state.latest_theta, 1, "Theta",
+                                    -motor.THETA_SAFE, motor.THETA_SAFE, ser):
+                print("❌ Échec du mouvement Theta")
+                break
+            
+            print(f"🔍 DEBUG: Theta atteint, début balayage Psi ({len(psi_positions)} positions)")
+            if not sweep_psi(theta_cmd, psi_positions, ser, dataset,
+                            acquisition_mode, _update_progress):
+                print("❌ Échec du balayage Psi")
+                break
+
+        if state.running:
+            print("\n=== FIN DU SCAN RÉUSSIE ===")
+            state.progress_val = 100
+            if progress_callback:
+                progress_callback(100)
+            motor.move_motor(0, lambda: state.latest_psi, 2, "Psi",
+                            -motor.PSI_SAFE, motor.PSI_SAFE, ser)
+            motor.move_motor(0, lambda: state.latest_theta, 1, "Theta",
+                            -motor.THETA_SAFE, motor.THETA_SAFE, ser)
+
+        if dataset:
+            fname = f"scan_{datetime.now().strftime('%H%M%S')}.csv"
+            with open(fname, "w", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow(["time", "theta_cmd", "theta", "psi", "x_lsb", "y_lsb", "z_lsb", "norm"])
+                writer.writerows(dataset)
+            print(f"💾 Fichier sauvegardé : {fname}")
     except Exception as e:
-        print(f"❌ Erreur lecture config: {e}")
-        return
-
-    dataset = []
-    total_psi_points = sum(len(step.get("psi_positions", [])) for step in sequence)
-    points_done = 0
-
-    def _update_progress():
-        nonlocal points_done
-        points_done += 1
-        if total_psi_points > 0:
-            state.progress_val = int((points_done / total_psi_points) * 100)
-        if progress_callback:
-            progress_callback(state.progress_val)
-
-    print("=== INITIALISATION (Psi 180°) ===")
-    if not motor.move_motor(180, lambda: state.latest_psi, 2, "Psi",
-                            -motor.PSI_SAFE, motor.PSI_SAFE, ser):
-        return
-
-    for step_idx, step in enumerate(sequence, 1):
-        if not state.running:
-            break
-        theta_cmd = utils.clamp(step["theta"], -motor.THETA_SAFE, motor.THETA_SAFE)
-        psi_positions = step.get("psi_positions", [])
-        print(f"\nÉTAPE {step_idx}/{len(sequence)} (Theta {theta_cmd}°)")
-        if not motor.move_motor(theta_cmd, lambda: state.latest_theta, 1, "Theta",
-                                -motor.THETA_SAFE, motor.THETA_SAFE, ser):
-            break
-        if not sweep_psi(theta_cmd, psi_positions, ser, dataset,
-                         acquisition_mode, _update_progress):
-            break
-
-    if state.running:
-        print("\n=== FIN DU SCAN RÉUSSIE ===")
-        state.progress_val = 100
-        if progress_callback:
-            progress_callback(100)
-        motor.move_motor(0, lambda: state.latest_psi, 2, "Psi",
-                         -motor.PSI_SAFE, motor.PSI_SAFE, ser)
-        motor.move_motor(0, lambda: state.latest_theta, 1, "Theta",
-                         -motor.THETA_SAFE, motor.THETA_SAFE, ser)
-
-    if dataset:
-        fname = f"scan_{datetime.now().strftime('%H%M%S')}.csv"
-        with open(fname, "w", newline="") as f:
-            writer = csv.writer(f)
-            writer.writerow(["time", "theta_cmd", "theta", "psi", "x_lsb", "y_lsb", "z_lsb", "norm"])
-            writer.writerows(dataset)
-        print(f"💾 Fichier sauvegardé : {fname}")
+        print(f"❌ ERREUR CRITIQUE dans run_sequence : {e}")
+        import traceback
+        traceback.print_exc()

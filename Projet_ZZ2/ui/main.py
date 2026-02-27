@@ -63,7 +63,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.sock = sock
         self.ser = ser
         self.setWindowTitle("Control Center Pro - Banc Accéléromètre (modulaire)")
-        self.resize(1600, 950)
+        # Taille initiale plus petite pour éviter les conflits de géométrie
+        # La fenêtre sera maximisée ensuite via QTimer
+        self.resize(1200, 800)
         self.setStyleSheet(STYLE_SHEET)
 
         # tampons utilisés pour le tracé en temps réel
@@ -229,12 +231,47 @@ class MainWindow(QtWidgets.QMainWindow):
         seq_lyt = QtWidgets.QVBoxLayout(seq_frame)
         seq_lyt.setContentsMargins(6, 6, 6, 6)
         btn_perso = QtWidgets.QPushButton("🚀 PERSO")
-        btn_perso.setStyleSheet("background-color: #27AE60; padding: 5px; font-size: 12px;")
+        btn_perso.setStyleSheet("""
+            QPushButton {
+                background-color: #27AE60; 
+                padding: 5px; 
+                font-size: 12px;
+                border-radius: 5px;
+                color: white;
+                font-weight: bold;
+                border: 2px solid #27AE60;
+            }
+            QPushButton:hover {
+                background-color: #2ECC71;
+                border: 2px solid #58D68D;
+            }
+            QPushButton:pressed {
+                background-color: #229954;
+                border: 2px solid #1E8449;
+            }
+        """)
         btn_perso.clicked.connect(lambda: self.launch_scan("config_custom.json"))
         seq_lyt.addWidget(btn_perso)
         for mode, config_file in [("Standard", "config_standard.json"), ("Rapide", "config_rapide.json"), ("Lent", "config_lent.json")]:
             btn = QtWidgets.QPushButton(mode)
-            btn.setStyleSheet("background-color: #34495E; color: white; border-radius: 5px; padding: 8px; font-weight: bold; border: None;")
+            btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #34495E; 
+                    color: white; 
+                    border-radius: 5px; 
+                    padding: 8px; 
+                    font-weight: bold; 
+                    border: 2px solid #34495E;
+                }
+                QPushButton:hover {
+                    background-color: #3498DB;
+                    border: 2px solid #5DADE2;
+                }
+                QPushButton:pressed {
+                    background-color: #2980B9;
+                    border: 2px solid #2471A3;
+                }
+            """)
             btn.clicked.connect(lambda chk, c=config_file: self.launch_scan(c))
             seq_lyt.addWidget(btn)
         side_layout.addWidget(create_collapsible_section("Séquences", seq_frame, expanded=False))
@@ -261,12 +298,44 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_pause = QtWidgets.QPushButton("⏸")
         self.btn_pause.setToolTip("Pause")
         self.btn_pause.setFixedSize(64, 36)
-        self.btn_pause.setStyleSheet("background-color: #34495E; color: white; border-radius: 5px; font-size: 14px; border: None;")
+        self.btn_pause.setStyleSheet("""
+            QPushButton {
+                background-color: #34495E; 
+                color: white; 
+                border-radius: 5px; 
+                font-size: 14px; 
+                border: 2px solid #34495E;
+            }
+            QPushButton:hover {
+                background-color: #F39C12;
+                border: 2px solid #F8C471;
+            }
+            QPushButton:pressed {
+                background-color: #E67E22;
+                border: 2px solid #DC7633;
+            }
+        """)
         self.btn_pause.clicked.connect(self.action_pause)
         self.btn_resume = QtWidgets.QPushButton("▶")
         self.btn_resume.setToolTip("Reprise")
         self.btn_resume.setFixedSize(64, 36)
-        self.btn_resume.setStyleSheet("background-color: #34495E; color: white; border-radius: 5px; font-size: 14px; border: None;")
+        self.btn_resume.setStyleSheet("""
+            QPushButton {
+                background-color: #34495E; 
+                color: white; 
+                border-radius: 5px; 
+                font-size: 14px; 
+                border: 2px solid #34495E;
+            }
+            QPushButton:hover {
+                background-color: #27AE60;
+                border: 2px solid #58D68D;
+            }
+            QPushButton:pressed {
+                background-color: #229954;
+                border: 2px solid #1E8449;
+            }
+        """)
         self.btn_resume.clicked.connect(self.action_resume)
         ctrl_lyt.addWidget(self.btn_pause)
         ctrl_lyt.addWidget(self.btn_resume)
@@ -280,7 +349,24 @@ class MainWindow(QtWidgets.QMainWindow):
         self.emergency_btn = QtWidgets.QPushButton("🛑 STOP")
         self.emergency_btn.setObjectName("Emergency")
         self.emergency_btn.setFixedHeight(50)
-        self.emergency_btn.setStyleSheet("background-color: #C0392B; color: white; border-radius: 5px; font-size: 14px; font-weight: bold; border: None;")
+        self.emergency_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #C0392B; 
+                color: white; 
+                border-radius: 5px; 
+                font-size: 14px; 
+                font-weight: bold; 
+                border: 3px solid #C0392B;
+            }
+            QPushButton:hover {
+                background-color: #E74C3C;
+                border: 3px solid #EC7063;
+            }
+            QPushButton:pressed {
+                background-color: #A93226;
+                border: 3px solid #922B21;
+            }
+        """)
         self.emergency_btn.clicked.connect(self.action_emergency)
         side_layout.addWidget(self.emergency_btn)
 
@@ -404,7 +490,25 @@ class MainWindow(QtWidgets.QMainWindow):
         layout.addWidget(form_frame)
         btn_save_settings = QtWidgets.QPushButton("💾 ENREGISTRER & REDÉMARRER")
         btn_save_settings.setFixedHeight(50)
-        btn_save_settings.setStyleSheet("background-color: #2980B9; font-size: 14px;")
+        btn_save_settings.setStyleSheet("""
+            QPushButton {
+                background-color: #2980B9; 
+                font-size: 14px;
+                color: white;
+                border-radius: 5px;
+                font-weight: bold;
+                border: 2px solid #2980B9;
+                padding: 8px;
+            }
+            QPushButton:hover {
+                background-color: #3498DB;
+                border: 2px solid #5DADE2;
+            }
+            QPushButton:pressed {
+                background-color: #21618C;
+                border: 2px solid #1B4F72;
+            }
+        """)
         btn_save_settings.clicked.connect(self.save_settings_and_restart)
         layout.addWidget(btn_save_settings)
         layout.addStretch()
@@ -661,7 +765,12 @@ def main():
     # logic remains valid.
     accel_conn = sock if transport == 'tcp' else locals().get('ser_acc', None)
     win = MainWindow(accel_conn, ser)
-    win.showMaximized()
+    
+    # Afficher d'abord la fenêtre, puis la maximiser pour éviter les warnings de géométrie
+    win.show()
+    # Utiliser QTimer pour maximiser après l'affichage initial
+    QtCore.QTimer.singleShot(0, lambda: win.setWindowState(win.windowState() | QtCore.Qt.WindowMaximized))
+    
     sys.exit(app.exec_())
 
 

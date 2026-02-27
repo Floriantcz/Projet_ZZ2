@@ -21,6 +21,7 @@ CONTROL_PERIOD = 0.05
 TIMEOUT = 30
 THETA_SAFE = 85.0
 PSI_SAFE = 179.0
+SETTLE_TIME = 0.5  # temps d'attente après mouvement (secondes)
 
 
 def send(ser, cmd: str):
@@ -111,23 +112,33 @@ def move_motor(
 
     target = utils.clamp(target, amin, amax)
     start = time.time()
-    print(f"→ {name} cible : {target:+.1f}°")
+    print(f"→ {name} cible : {target:+.1f}° (state.running={state.running})")
 
+    iterations = 0
     while state.running:
+        iterations += 1
+        if iterations % 20 == 0:  # Log every second
+            print(f"🔍 DEBUG: {name} boucle #{iterations}, still running...")
+            
         start = handle_pause(ser, start)
         with state.accel_lock:
             current = get_angle()
 
         if current is None:
+            if iterations == 1:
+                print(f"⚠ {name}: angle actuel None, attente données accéléromètre...")
             time.sleep(CONTROL_PERIOD)
             continue
 
         current = utils.normalize_angle(current)
         error = utils.shortest_angle_error(target, current)
 
+        if iterations <= 3:  # Log first few iterations
+            print(f"🔍 DEBUG: {name} iter {iterations}: current={current:.1f}°, error={error:.1f}°")
+
         if abs(error) < STOP_THRESHOLD:
             stop_all(ser)
-            print(f"✓ {name} atteint")
+            print(f"✓ {name} atteint après {iterations} itérations")
             return True
 
         speed = utils.clamp(KP * error, -MAX_SPEED, MAX_SPEED)
@@ -138,12 +149,13 @@ def move_motor(
 
         if time.time() - start > TIMEOUT:
             stop_all(ser)
-            print(f"❌ Timeout {name}")
+            print(f"❌ Timeout {name} après {iterations} itérations")
             return False
 
         time.sleep(CONTROL_PERIOD)
 
     stop_all(ser)
+    print(f"⚠ {name}: sortie de boucle car state.running=False après {iterations} itérations")
     return False
 
 

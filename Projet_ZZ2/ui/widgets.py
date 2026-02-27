@@ -5,7 +5,7 @@ standard de console et la chaîne de feuille de style globale.
 """
 
 import numpy as np
-from PyQt5 import QtWidgets
+from PyQt5 import QtWidgets, QtCore
 from PyQt5.QtCore import pyqtSignal
 import pyqtgraph.opengl as gl
 
@@ -22,10 +22,30 @@ QFrame#ControlPanel { background-color: #1E1E1E; border-radius: 10px; margin: 5p
 QLabel { color: #E0E0E0; font-family: 'Segoe UI', sans-serif; }
 QLabel#Title { font-size: 14px; font-weight: bold; color: #3498DB; margin-bottom: 5px; text-transform: uppercase; }
 QLabel#ValueDisplay { font-size: 32px; font-weight: bold; color: #FFFFFF; background-color: #2D2D2D; border-radius: 5px; padding: 10px; }
-QPushButton { background-color: #34495E; color: white; border-radius: 5px; padding: 8px; font-weight: bold; border: None; }
-QPushButton:hover { background-color: #3498DB; }
-QPushButton#Emergency { background-color: #C0392B; }
-QPushButton#Emergency:hover { background-color: #E74C3C; }
+QPushButton { 
+    background-color: #34495E; 
+    color: white; 
+    border-radius: 5px; 
+    padding: 8px; 
+    font-weight: bold; 
+    border: 2px solid #34495E;
+}
+QPushButton:hover { 
+    background-color: #3498DB;
+    border: 2px solid #5DADE2;
+}
+QPushButton:pressed {
+    background-color: #2980B9;
+    border: 2px solid #2471A3;
+}
+QPushButton#Emergency { 
+    background-color: #C0392B;
+    border: 2px solid #C0392B;
+}
+QPushButton#Emergency:hover { 
+    background-color: #E74C3C;
+    border: 2px solid #EC7063;
+}
 QProgressBar { border: 2px solid #34495E; border-radius: 5px; text-align: center; color: white; font-weight: bold; background-color: #1E1E1E; }
 QProgressBar::chunk { background-color: #27AE60; width: 10px; margin: 0.5px; }
 QTextEdit#Console {
@@ -44,19 +64,31 @@ QLineEdit, QDoubleSpinBox, QComboBox { background-color: #2D2D2D; color: white; 
 """
 
 
-class OutLog:
+class OutLog(QtCore.QObject):
     """Redirige la sortie de ``print()`` vers un QTextEdit avec
     colorisation.
 
-    La version originale dans ``gui.py`` était monolithique ; ici elle
+    La version originale dans ``gui.py`` était monolithique ; ici elle
     est documentée et peut être réutilisée par n'importe quel widget qui
     a besoin d'une console.
     """
+    
+    # Signal thread-safe pour écrire dans le QTextEdit
+    append_signal = pyqtSignal(str)
 
     def __init__(self, edit: QtWidgets.QTextEdit, out=None, color=None):
+        super().__init__()
         self.edit = edit
         self.out = out
         self.color = color
+        # Connecter le signal au slot
+        self.append_signal.connect(self._append_text)
+    
+    def _append_text(self, text):
+        """Slot thread-safe pour ajouter du texte au QTextEdit."""
+        self.edit.append(text)
+        scrollbar = self.edit.verticalScrollBar()
+        scrollbar.setValue(scrollbar.maximum())
 
     def write(self, m):
         if m.strip():
@@ -76,9 +108,8 @@ class OutLog:
             else:
                 formatted = f'<span style="color: #58D68D;">{msg}</span>'
 
-            self.edit.append(formatted)
-            scrollbar = self.edit.verticalScrollBar()
-            scrollbar.setValue(scrollbar.maximum())
+            # Utiliser le signal au lieu d'appeler directement append
+            self.append_signal.emit(formatted)
 
         if self.out:
             self.out.write(m)
