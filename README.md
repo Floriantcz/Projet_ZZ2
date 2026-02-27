@@ -1,7 +1,6 @@
 # Projet_ZZ2
 
-Pour lancer l'interface fonctionnelle, utiliser la commande suivant (dans le répertoire parent de Projet_ZZ2) :
-      - python -m Projet_ZZ2.ui.main
+Pour lancer l'interface fonctionnelle, utiliser la commande suivant (dans le répertoire parent de Projet_ZZ2) : python -m Projet_ZZ2.ui.main
 
 ## Reformulation du projet
 Le projet consiste à développer un logiciel Python permettant de piloter un banc rotatif de calibration avec un accéléromètre, d'acquérir les mesures, de les sauvegarder, de les calibrer à l'aide d'un algorithme existant, et de visualiser les données en temps réel via une interface utilisateur.
