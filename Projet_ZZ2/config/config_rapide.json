@@ -1,0 +1,11 @@
+{
+  "sequence": [
+    { "theta": 0,   "psi_positions": [] },
+    { "theta": 90,  "psi_positions": [] },
+    { "theta": 45,  "psi_positions": [180, 120, 0, -120, -180]},
+    { "theta": 0,   "psi_positions": [-180, -150, -90, 0, 90, 150, 180]},
+    { "theta": -45, "psi_positions": [180, 120, 0, -120, -180]},
+    { "theta": -90, "psi_positions": [] },
+    { "theta": 0,   "psi_positions": [] }
+  ]
+}

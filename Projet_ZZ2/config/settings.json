@@ -1,0 +1,10 @@
+{
+    "network": {
+        "host": "192.168.4.1",
+        "port": 3535
+    },
+    "serial": {
+        "port": "COM9",
+        "baudrate": 115200
+    }
+}

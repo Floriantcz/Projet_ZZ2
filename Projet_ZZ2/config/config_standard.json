@@ -1,0 +1,13 @@
+{
+  "sequence": [
+    { "theta": 0,   "psi_positions": [] },
+    { "theta": 90,  "psi_positions": [] },
+    { "theta": 60,  "psi_positions": [180, 120, 0, -120, -180]},
+    { "theta": 30,  "psi_positions": [-180, -150, -90, 0, 90, 150, 180]},
+    { "theta": 0,   "psi_positions": [180, 162.5, 127.5, 75, 0, -75, -127.5, -162.5, -180]},
+    { "theta": -30, "psi_positions": [-180, -150, -90, 0, 90, 150, 180]},
+    { "theta": -60, "psi_positions": [180, 120, 0, -120, -180]},
+    { "theta": -90, "psi_positions": [] },
+    { "theta": 0,   "psi_positions": [] }
+  ]
+}
