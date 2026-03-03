@@ -436,7 +436,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.calib_plot.setAspectLocked(True)
         self.calib_plot.addLegend()
         self.scatter_raw = pg.ScatterPlotItem(size=5, brush=pg.mkBrush(200, 200, 200, 100), name="Données Brutes")
-        self.scatter_cal = pg.ScatterPlotItem(size=5, brush=pg.mkBrush(46, 204, 113, 200), name="Données Calibrées")
+        self.scatter_cal = pg.ScatterPlotItem(size=5, brush=pg.mkBrush(20, 120, 40, 200), name="Données Calibrées")
         self.calib_plot.addItem(self.scatter_raw)
         self.calib_plot.addItem(self.scatter_cal)
         layout.addWidget(self.calib_plot, stretch=2)
@@ -566,56 +566,100 @@ class MainWindow(QtWidgets.QMainWindow):
             print(f"✅ Configuration sauvegardée ({len(seq)} étapes).")
 
     def process_calibration(self):
-        path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Ouvrir le scan", "", "CSV Files (*.csv)")
-        if not path:
+            path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Ouvrir le scan", "", "CSV Files (*.csv)")
+            if not path:
+                return
+            try:
+                import csv
+                with open(path, 'r') as f:
+                    reader = csv.DictReader(f)
+                    rows = list(reader)
+                if not rows:
+                    print("❌ Fichier CSV vide")
+                    return
+                required_cols = ['x_lsb', 'y_lsb', 'z_lsb']
+                header = rows[0].keys()
+                if not all(col in header for col in required_cols):
+                    print(f"❌ Colonnes manquantes. Colonnes trouvées : {list(header)}")
+                    return
+                
+                raw_lsb = []
+                for row in rows:
+                    try:
+                        raw_lsb.append([float(row['x_lsb']), float(row['y_lsb']), float(row['z_lsb'])])
+                    except (ValueError, KeyError):
+                        continue
+                        
+                if not raw_lsb:
+                    print("❌ Aucune donnée valide trouvée")
+                    return
+                raw_lsb = np.array(raw_lsb)
+
+                # --- 1. INTÉGRATION DU MOTEUR DE CALIBRATION ---
+                calibrator = utils.CalibratorEngine(sensitivity=accel.SENSITIVITY)
+                raw_g, cal_g = calibrator.calibrate_data(raw_lsb)
+
+                # --- 2. MISE À JOUR DU GRAPHIQUE ---
+                self.scatter_raw.setData(raw_g[:, 0], raw_g[:, 1])
+                self.scatter_cal.setData(cal_g[:, 0], cal_g[:, 1])
+
+                # --- 3. CALCUL DES STATISTIQUES ---
+                norms_raw = np.linalg.norm(raw_g, axis=1)
+                norms_cal = np.linalg.norm(cal_g, axis=1)
+                
+                # --- 4. MISE À JOUR DE LA ZONE DE TEXTE ---
+                res_text = f"--- RÉSULTATS DE CALIBRATION ---\n"
+                res_text += f"Fichier : {os.path.basename(path)}\n"
+                res_text += f"Points valides : {len(raw_g)}\n\n"
+                
+                res_text += f"[BRUT] Norme moyenne : {np.mean(norms_raw):.6f} ± {np.std(norms_raw):.6f} g\n"
+                res_text += f"[CALIBRÉ] Norme moyenne : {np.mean(norms_cal):.6f} ± {np.std(norms_cal):.6f} g\n\n"
+                
+                res_text += "--- PARAMÈTRES IDENTIFIÉS ---\n"
+                res_text += "Biais (Offset) b :\n"
+                res_text += f"X: {calibrator.b[0,0]:.6f} g\n"
+                res_text += f"Y: {calibrator.b[1,0]:.6f} g\n"
+                res_text += f"Z: {calibrator.b[2,0]:.6f} g\n\n"
+                
+                res_text += "Matrice de correction A_1 :\n"
+                res_text += f"[{calibrator.A_1[0,0]:.5f}, {calibrator.A_1[0,1]:.5f}, {calibrator.A_1[0,2]:.5f}]\n"
+                res_text += f"[{calibrator.A_1[1,0]:.5f}, {calibrator.A_1[1,1]:.5f}, {calibrator.A_1[1,2]:.5f}]\n"
+                res_text += f"[{calibrator.A_1[2,0]:.5f}, {calibrator.A_1[2,1]:.5f}, {calibrator.A_1[2,2]:.5f}]\n"
+
+                self.calib_results.setPlainText(res_text)
+
+                # --- 5. SAUVEGARDE EN MÉMOIRE POUR LE BOUTON ---
+                self._current_calib_b = calibrator.b
+                self._current_calib_A1 = calibrator.A_1
+                self.btn_save_params.setEnabled(True)
+
+                print(f"✅ Calibration réussie ! La norme est passée de {np.mean(norms_raw):.3f}g à {np.mean(norms_cal):.3f}g")
+
+            except Exception as e:
+                print(f"❌ Erreur lors du traitement : {e}")
+                import traceback
+                traceback.print_exc()
+
+    def save_calibration_params(self):
+        """Sauvegarde les matrices A_1 et b dans config/calibration.json"""
+        if not hasattr(self, '_current_calib_A1') or not hasattr(self, '_current_calib_b'):
+            QtWidgets.QMessageBox.warning(self, "Erreur", "Aucune donnée de calibration calculée à sauvegarder.")
             return
+
         try:
-            import csv
-            with open(path, 'r') as f:
-                reader = csv.DictReader(f)
-                rows = list(reader)
-            if not rows:
-                print("❌ Fichier CSV vide")
-                return
-            required_cols = ['x_lsb', 'y_lsb', 'z_lsb']
-            header = rows[0].keys()
-            if not all(col in header for col in required_cols):
-                print(f"❌ Colonnes manquantes. Colonnes trouvées : {list(header)}")
-                return
-            raw_lsb = []
-            for row in rows:
-                try:
-                    x = float(row['x_lsb'])
-                    y = float(row['y_lsb'])
-                    z = float(row['z_lsb'])
-                    raw_lsb.append([x, y, z])
-                except (ValueError, KeyError):
-                    continue
-            if not raw_lsb:
-                print("❌ Aucune donnée valide trouvée")
-                return
-            raw_lsb = np.array(raw_lsb)
-            raw_g = raw_lsb / accel.SENSITIVITY
-            self.scatter_raw.setData(raw_g[:, 0], raw_g[:, 1])
-            x_mean, y_mean, z_mean = np.mean(raw_g, axis=0)
-            x_std, y_std, z_std = np.std(raw_g, axis=0)
-            norms = np.sqrt(np.sum(raw_g**2, axis=1))
-            norm_mean = np.mean(norms)
-            norm_std = np.std(norms)
-            res_text = f"--- STATISTIQUES BRUTES ---\n"
-            res_text += f"Fichier : {os.path.basename(path)}\n"
-            res_text += f"Nombre de points : {len(raw_g)}\n\n"
-            res_text += f"X: {x_mean:.6f} ± {x_std:.6f} g\n"
-            res_text += f"Y: {y_mean:.6f} ± {y_std:.6f} g\n"
-            res_text += f"Z: {z_mean:.6f} ± {z_std:.6f} g\n\n"
-            res_text += f"Norme moyenne: {norm_mean:.6f} ± {norm_std:.6f} g\n"
-            res_text += f"(Théorique: 1.0 g)\n"
-            self.calib_results.setPlainText(res_text)
-            print(f"✅ Données chargées : {len(raw_g)} points depuis {os.path.basename(path)}")
+            calib_data = {
+                "A_1": self._current_calib_A1.tolist(),
+                "b": self._current_calib_b.tolist()
+            }
+            filepath = config_path("calibration.json")
+            os.makedirs(CONFIG_DIR, exist_ok=True)
+            with open(filepath, 'w') as f:
+                json.dump(calib_data, f, indent=4)
+            QtWidgets.QMessageBox.information(self, "Succès", "Matrice de calibration sauvegardée avec succès !")
+            print("✅ Paramètres de calibration enregistrés dans config/calibration.json.")
         except Exception as e:
-            print(f"❌ Erreur lors du traitement : {e}")
-            import traceback
-            traceback.print_exc()
+            QtWidgets.QMessageBox.critical(self, "Erreur", f"Échec de la sauvegarde : {e}")
+            print(f"❌ Erreur lors de la sauvegarde de la calibration : {e}")
 
     def update_kp(self, val):
         motor.KP = val / 10.0
@@ -641,7 +685,6 @@ class MainWindow(QtWidgets.QMainWindow):
             self.lbl_flow_status.setText("État: running")
 
     def _on_transport_changed(self, transport: str):
-        # enable/disable network/USB fields based on choice
         tcp = transport.lower() == "tcp"
         self.edit_host.setEnabled(tcp)
         self.edit_port.setEnabled(tcp)
@@ -667,19 +710,17 @@ class MainWindow(QtWidgets.QMainWindow):
             }
             if cfg.save_settings(new_conf):
                 print("♻ Redémarrage de l'application...")
-                # re‑launch using -m to avoid issues with spaces in the
-                # working directory path (sys.argv may be split at spaces).
-                # keep the same environment and arguments apart from the
-                # module name which we explicitly specify.
-                os.execl(sys.executable,
+                new_env = os.environ.copy()
+                new_env['QT_QPA_PLATFORM'] = 'xcb'
+                os.execle(sys.executable,
                          sys.executable,
                          "-m",
-                         "Projet_ZZ2.ui.main")
+                         "Projet_ZZ2.ui.main",
+                         new_env)
         except ValueError:
             QtWidgets.QMessageBox.critical(self, "Erreur", "Veuillez entrer des valeurs numériques valides.")
 
     def launch_scan(self, config_file):
-        # convert bare filenames to the config directory
         if not os.path.isabs(config_file):
             config_file = config_path(config_file)
         if not os.path.exists(config_file):
@@ -721,10 +762,8 @@ def main():
     app.setStyle("Fusion")
 
     sock, ser = None, None
-    # attempt connections using configuration loaded from settings.json
     settings = cfg.load_settings()
 
-    # accelerometer connection: TCP or USB depending on configuration
     transport = settings.get('transport', 'tcp').lower()
     if transport == 'tcp':
         try:
@@ -737,12 +776,11 @@ def main():
             print(f"❌ Erreur Réseau : {e}")
             sock = None
     else:
-        # USB path: open a separate serial port for accel
         try:
             usb_port = settings.get('usb', {}).get('port', '')
             usb_baud = settings.get('usb', {}).get('baudrate', 115200)
             if usb_port:
-                sock = None  # not used
+                sock = None
                 ser_acc = serial.Serial(usb_port, usb_baud, timeout=1)
                 Thread(target=accel.accel_reader_serial, args=(ser_acc,), daemon=True).start()
                 print("✅ Connecté à l'accéléromètre (USB).")
@@ -752,7 +790,6 @@ def main():
             print(f"❌ Erreur USB : {e}")
             sock = None
 
-    # motor serial connection remains unchanged
     try:
         ser = serial.Serial(settings['serial']['port'], settings['serial']['baudrate'], timeout=1)
         print("✅ Connecté aux moteurs.")
@@ -760,15 +797,10 @@ def main():
         print(f"❌ Erreur Série : {e}")
         ser = None
 
-    # pass the object representing the accelerometer connection
-    # (either TCP socket or the USB serial port) so that the UI warning
-    # logic remains valid.
     accel_conn = sock if transport == 'tcp' else locals().get('ser_acc', None)
     win = MainWindow(accel_conn, ser)
     
-    # Afficher d'abord la fenêtre, puis la maximiser pour éviter les warnings de géométrie
     win.show()
-    # Utiliser QTimer pour maximiser après l'affichage initial
     QtCore.QTimer.singleShot(0, lambda: win.setWindowState(win.windowState() | QtCore.Qt.WindowMaximized))
     
     sys.exit(app.exec_())
