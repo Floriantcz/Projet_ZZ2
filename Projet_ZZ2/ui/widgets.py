@@ -151,60 +151,75 @@ class GimbalWidget3D(gl.GLViewWidget):
         self.setCameraPosition(distance=18, elevation=22, azimuth=35)
         self.setBackgroundColor((10, 14, 20))
 
+        # Constantes partagées avec set_angles
+        self.LEG_H = 3.0   # hauteur des piliers
+        self.LEG_S = 3.5   # écartement XZ des piliers
+        lw = 0.2           # section carrée des piliers
+
+        # Grille au sol
         grid = gl.GLGridItem()
-        grid.scale(1, 1, 1)
         self.addItem(grid)
 
-        color_base = (0.76, 0.83, 0.91, 1.0)
-        leg_h, leg_s, lw = 1.6, 4, 0.1
-        for sx in [-1, 1]:
-            for sz in [-1, 1]:
-                leg = _create_box(lw, leg_h, lw, color_base)
-                leg.translate(sx * leg_s, leg_h / 2, sz * leg_s)
-                self.addItem(leg)
-
+        # ── Cadre (pivot Theta) posé au sommet des piliers ──
         self.cadre_root = gl.GLMeshItem(
             meshdata=gl.MeshData.sphere(rows=10, cols=10),
-            drawFaces=False,
-            drawEdges=False
+            drawFaces=False, drawEdges=False
         )
         self.addItem(self.cadre_root)
 
-        scale = 1.5
-        frame_s, fw = 1.85 * scale, 0.11 * scale
+        scale   = 1.5
+        frame_s = 1.85 * scale
+        fw      = 0.11 * scale
         color_cadre = (0.92, 0.95, 1.0, 1.0)
+
         for tx, tz, rw, rd in [
-            (0, frame_s, frame_s*2, fw),
-            (0, -frame_s, frame_s*2, fw),
-            (frame_s, 0, fw, frame_s*2),
-            (-frame_s, 0, fw, frame_s*2)
+            ( 0,        frame_s,  frame_s * 2, fw),
+            ( 0,       -frame_s,  frame_s * 2, fw),
+            ( frame_s,  0,        fw, frame_s * 2),
+            (-frame_s,  0,        fw, frame_s * 2),
         ]:
             box = _create_box(rw, fw, rd, color_cadre)
             box.translate(tx, 0, tz)
             box.setParentItem(self.cadre_root)
 
+        # ── Plateau (pivot Psi, enfant du cadre) ──
         self.plateau_root = gl.GLMeshItem(
             meshdata=gl.MeshData.sphere(rows=10, cols=10),
-            drawFaces=False,
-            drawEdges=False
+            drawFaces=False, drawEdges=False
         )
         self.plateau_root.setParentItem(self.cadre_root)
 
-        plate_s = 1.50 * scale
+        plate_s     = 1.50 * scale
         color_plate = (0.74, 0.58, 0.36, 1.0)
         plate = _create_box(plate_s * 2, 0.10 * scale, plate_s * 2, color_plate)
         plate.setParentItem(self.plateau_root)
 
-    def set_angles(self, theta: float, psi: float):
-        """Met à jour l'orientation du cardan.
+        # Initialisation visuelle à angles nuls
+        self.set_angles(0, 0)
 
-        ``theta`` fait tourner le cadre extérieur, ``psi`` incline la
-        plaque intérieure.
-        """
+
+    def set_angles(self, theta, psi):
         self.cadre_root.resetTransform()
-        self.cadre_root.translate(0, 1.6, 0)
-        self.cadre_root.rotate(90, 1, 0, 0)
-        self.cadre_root.rotate(-theta, 0, 0, 1)
+        # 1. Monte le cadre exactement au sommet des piliers
+        self.cadre_root.translate(0, self.LEG_H, 0)
+        # 2. Couche l'ensemble horizontalement
+        self.cadre_root.rotate(90, 1 , 0, 0)
+        # 3. Applique la rotation Theta
+        self.cadre_root.rotate(-theta, 1, 0, 0)
 
         self.plateau_root.resetTransform()
+        
         self.plateau_root.rotate(-psi, 1, 0, 0)
+
+
+    """def set_angles(self, theta, psi):
+        self.cadre_root.resetTransform()
+        # 1. Monte le cadre au sommet des piliers sur l'axe Z
+        self.cadre_root.translate(0, 0, self.LEG_H)
+        
+        # 2. Applique la rotation Theta (Axe X par exemple)
+        self.cadre_root.rotate(theta, 1, 0, 0)
+
+        self.plateau_root.resetTransform()
+        # 3. Applique la rotation Psi (Axe Y pour faire un cardan perpendiculaire)
+        self.plateau_root.rotate(psi, 0, 1, 0)"""
